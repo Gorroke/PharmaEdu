@@ -26,6 +26,11 @@ export default function LearnLayout({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { visited } = useVisitedChapters();
 
+  // /learn/lesson/[slug] 경로는 별도 레이아웃 사용 — 사이드바 없이 children만 렌더
+  if (pathname.startsWith('/learn/lesson')) {
+    return <>{children}</>;
+  }
+
   const visitedCount = CHAPTERS.filter((ch) => visited.has(ch.slug)).length;
 
   return (
