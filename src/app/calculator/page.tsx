@@ -39,6 +39,9 @@ const INSU_PAY_OPTIONS = [
   { value: 'fullSelf',   label: '100%본인' },
   { value: 'partial50',  label: '선별50%' },
   { value: 'partial80',  label: '선별80%' },
+  { value: 'partial30',  label: 'D항 선별30%' },
+  { value: 'partial90',  label: 'E항 선별90%' },
+  { value: 'veteran100', label: 'V항 보훈100/100' },
 ];
 
 const TAKE_OPTIONS = [
@@ -96,6 +99,31 @@ const GENDER_OPTIONS = [
   { value: 'F', label: '여(F)' },
 ];
 
+// ── 고급 옵션 드롭다운 ─────────────────────────────────────────────────────
+
+const MT038_OPTIONS = [
+  { value: '',  label: '(해당 없음)' },
+  { value: '2', label: '2 — 국비환자 타질환 조제분' },
+  { value: 'A', label: 'A — 60% 감면 (도서벽지 내 약국)' },
+];
+
+const NPAY_ROUND_OPTIONS = [
+  { value: '',          label: '(기본값)' },
+  { value: 'None',      label: 'None — 반올림 없음' },
+  { value: 'Floor10',   label: 'Floor10 — 10원 절사' },
+  { value: 'Floor100',  label: 'Floor100 — 100원 절사' },
+  { value: 'Round10',   label: 'Round10 — 10원 반올림' },
+  { value: 'Round100',  label: 'Round100 — 100원 반올림' },
+  { value: 'Ceil100',   label: 'Ceil100 — 100원 올림' },
+];
+
+const SPECIAL_PUB_OPTIONS = [
+  { value: '',    label: '(해당 없음)' },
+  { value: '302', label: '302 — 100% 본인부담약품 공비 전환' },
+  { value: '101', label: '101 — 특수공비 분리 A' },
+  { value: '102', label: '102 — 특수공비 분리 B' },
+];
+
 // ─── 유틸 ──────────────────────────────────────────────────────────────────
 
 function formatWon(n: number): string {
@@ -138,12 +166,21 @@ export default function CalculatorPage() {
   const [hasCounseling, setHasCounseling] = useState(false);
   const [isDalbitPharmacy, setIsDalbitPharmacy] = useState(false);
 
+  // ── 고급 옵션 ──
+  const [selfInjYN, setSelfInjYN] = useState('');
+  const [mt038, setMt038] = useState('');
+  const [nPayRoundType, setNPayRoundType] = useState('');
+  const [specialPub, setSpecialPub] = useState('');
+  const [isChadungExempt, setIsChadungExempt] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
   // ── 결과 ──
   const [result, setResult] = useState<CalcResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSteps, setShowSteps] = useState(true);
   const [showWageList, setShowWageList] = useState(true);
+  const [showNewFields, setShowNewFields] = useState(true);
 
   // ── 시나리오 탭 ──
   const [activeGroup, setActiveGroup] = useState(0);
@@ -196,6 +233,12 @@ export default function CalculatorPage() {
     setMediIllness('');
     setMediIllnessB('');
     setGender('');
+    // 고급 옵션 초기화
+    setSelfInjYN('');
+    setMt038('');
+    setNPayRoundType('');
+    setSpecialPub('');
+    setIsChadungExempt(false);
 
     setDrugs(
       sc.drugs.map((d) => ({
@@ -248,6 +291,7 @@ export default function CalculatorPage() {
         dosDate: dosDate.replace(/-/g, ''),
         insuCode,
         age: parsedAge,
+        sex: gender || undefined,
         drugList,
         // 가산
         isNight: isNight || undefined,
@@ -266,6 +310,12 @@ export default function CalculatorPage() {
         // 산정특례
         mediIllness: mediIllness || undefined,
         mediIllnessB: mediIllnessB || undefined,
+        // ── 고급 옵션 ──────────────────────────────────────────────────────
+        selfInjYN: selfInjYN || undefined,
+        mt038: mt038 || undefined,
+        nPayRoundType: nPayRoundType || undefined,
+        specialPub: specialPub || undefined,
+        isChadungExempt: isChadungExempt || undefined,
       };
 
       const res = await fetch('/api/calculate', {
@@ -291,6 +341,7 @@ export default function CalculatorPage() {
     isNight, isHolyDay, isSaturday, isMidNight,
     isDirectDispensing, isNonFace, hasCounseling, isDalbitPharmacy,
     mediIllness, mediIllnessB,
+    selfInjYN, mt038, nPayRoundType, specialPub, isChadungExempt,
   ]);
 
   // ── 렌더링 ────────────────────────────────────────────────────────────────
@@ -337,7 +388,7 @@ export default function CalculatorPage() {
                     key={g.label}
                     onClick={() => setActiveGroup(i)}
                     className={[
-                      'px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors',
+                      'px-2.5 py-2 min-h-[36px] rounded-md text-xs font-medium whitespace-nowrap transition-colors',
                       activeGroup === i
                         ? 'bg-primary-500 text-white'
                         : 'bg-bg-panel text-text-secondary hover:bg-primary-100 hover:text-primary-700',
@@ -475,7 +526,7 @@ export default function CalculatorPage() {
                   {/* 6세미만: 나이 자동 판정 — disabled 표시 */}
                   <label
                     className={[
-                      'flex items-center gap-2 px-3 py-2 rounded-lg border text-xs',
+                      'flex items-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg border text-xs',
                       isUnder6
                         ? 'border-primary-400 bg-primary-50 text-primary-700'
                         : 'border-border-light bg-bg-panel text-text-disabled',
@@ -547,7 +598,7 @@ export default function CalculatorPage() {
                         <button
                           onClick={() => removeDrugRow(drug.id)}
                           aria-label={`약품 ${idx + 1} 삭제`}
-                          className="text-text-muted hover:text-error-500 transition-colors"
+                          className="min-w-[44px] min-h-[44px] flex items-center justify-center text-text-muted hover:text-error-500 transition-colors rounded-lg hover:bg-error-50"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -574,14 +625,14 @@ export default function CalculatorPage() {
                     </div>
 
                     {/* 1회투약량 + 1일횟수 + 총일수 */}
-                    <div className="grid grid-cols-3 gap-2 mb-2">
+                    <div className="grid grid-cols-3 xs:grid-cols-3 gap-2 mb-2">
                       <Input label="1회투약량"   type="number" min="0" step="0.5" value={drug.dose} onChange={(e) => updateDrug(drug.id, 'dose', e.target.value)} />
                       <Input label="1일횟수"     type="number" min="1"           value={drug.dNum} onChange={(e) => updateDrug(drug.id, 'dNum', e.target.value)} />
                       <Input label="총투여일수"  type="number" min="1"           value={drug.dDay} onChange={(e) => updateDrug(drug.id, 'dDay', e.target.value)} />
                     </div>
 
                     {/* 급여구분 + 복용구분 + 산제여부 */}
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <Select
                         label="급여구분"
                         value={drug.insuPay}
@@ -621,6 +672,84 @@ export default function CalculatorPage() {
                 </Button>
               </div>
             </Card>
+
+            {/* ── 고급 옵션 ────────────────────────────────────────────── */}
+            <Card variant="outlined">
+              <button
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="w-full flex items-center justify-between text-sm font-semibold text-text-secondary"
+                aria-expanded={showAdvanced}
+              >
+                <span>고급 옵션 (Phase A+B+C 신규 기능)</span>
+                {showAdvanced
+                  ? <ChevronUp className="w-4 h-4 text-text-muted" />
+                  : <ChevronDown className="w-4 h-4 text-text-muted" />}
+              </button>
+
+              {showAdvanced && (
+                <div className="mt-4 space-y-4">
+                  <p className="text-xs text-text-muted">
+                    기본 사용자는 무시해도 됩니다. calc-engine의 세부 동작을 제어합니다.
+                  </p>
+
+                  {/* 자가투여주사제 */}
+                  <div className="flex items-center justify-between py-2 border-b border-border-light">
+                    <div>
+                      <p className="text-sm font-medium text-text-primary">자가투여주사제 (selfInjYN)</p>
+                      <p className="text-xs text-text-muted">Z4130 수가 활성화 — 자가주사제 처방 시</p>
+                    </div>
+                    <CheckChip
+                      id="selfInjYN"
+                      label="Y"
+                      description="자가투여주사제 여부"
+                      checked={selfInjYN === 'Y'}
+                      onChange={(v) => setSelfInjYN(v ? 'Y' : '')}
+                    />
+                  </div>
+
+                  {/* 차등수가 면제 */}
+                  <div className="flex items-center justify-between py-2 border-b border-border-light">
+                    <div>
+                      <p className="text-sm font-medium text-text-primary">차등수가 면제 (isChadungExempt)</p>
+                      <p className="text-xs text-text-muted">영업시간 기반 차등수가 면제 여부 (C계열 건강보험)</p>
+                    </div>
+                    <CheckChip
+                      id="isChadungExempt"
+                      label="면제"
+                      description="차등수가 면제 여부"
+                      checked={isChadungExempt}
+                      onChange={setIsChadungExempt}
+                    />
+                  </div>
+
+                  {/* MT038 */}
+                  <Select
+                    label="보훈 MT038 특정내역 (G20 위탁 전용)"
+                    value={mt038}
+                    onChange={(e) => setMt038(e.target.value)}
+                    options={MT038_OPTIONS}
+                    disabled={insuCode !== 'G20'}
+                    helperText={insuCode === 'G20' ? undefined : 'G20 (보훈 위탁) 보험코드에서만 활성'}
+                  />
+
+                  {/* 비급여 반올림 유형 */}
+                  <Select
+                    label="비급여 반올림 유형 (nPayRoundType)"
+                    value={nPayRoundType}
+                    onChange={(e) => setNPayRoundType(e.target.value)}
+                    options={NPAY_ROUND_OPTIONS}
+                  />
+
+                  {/* 특수공비 */}
+                  <Select
+                    label="특수공비 (specialPub)"
+                    value={specialPub}
+                    onChange={(e) => setSpecialPub(e.target.value)}
+                    options={SPECIAL_PUB_OPTIONS}
+                  />
+                </div>
+              )}
+            </Card>
           </div>
 
           {/* ────────────── 결과 패널 ────────────── */}
@@ -655,6 +784,10 @@ export default function CalculatorPage() {
                   <h2 className="text-base font-semibold text-text-primary mb-3 flex items-center gap-2 flex-wrap">
                     계산 결과
                     <Badge variant="success">완료</Badge>
+                    {/* 서식번호 */}
+                    {result.formNumber && (
+                      <Badge variant="neutral">{result.formNumber}</Badge>
+                    )}
                     {/* 보험 유형 뱃지 */}
                     {insuCode.startsWith('D') && <Badge variant="warning">의료급여</Badge>}
                     {(insuCode.startsWith('G') || bohunCode) && <Badge variant="info">보훈</Badge>}
@@ -711,8 +844,138 @@ export default function CalculatorPage() {
                             {result.totalPrice === result.userPrice + result.pubPrice ? '✓' : '✗ (불일치)'}</>
                       }
                     </div>
+
+                    {/* 요양급여비용총액2 */}
+                    {result.totalPrice2 !== undefined && (
+                      <div className="border-t border-border-light pt-3">
+                        <ResultRow label="요양급여비용총액2 (전자청구용)" value={result.totalPrice2} variant="primary" bold />
+                      </div>
+                    )}
+
+                    {/* 3자배분 확정값 */}
+                    {(result.sumUser !== undefined || result.sumInsure !== undefined || result.realPrice !== undefined) && (
+                      <div className="border-t border-border-light pt-3 space-y-2">
+                        <p className="text-xs font-semibold text-text-muted">3자배분 최종값</p>
+                        {result.sumUser    !== undefined && <ResultRow label="최종 환자수납액 (sumUser)"    value={result.sumUser}    variant="warning" />}
+                        {result.realPrice  !== undefined && <ResultRow label="실수납금 (realPrice)"         value={result.realPrice}  variant="warning" />}
+                        {result.insuPrice  !== undefined && <ResultRow label="공단부담금 (insuPrice)"       value={result.insuPrice}  variant="success" />}
+                        {result.sumInsure  !== undefined && <ResultRow label="최종 공단청구액 (sumInsure)"  value={result.sumInsure}  variant="success" />}
+                      </div>
+                    )}
                   </div>
                 </Card>
+
+                {/* ── 신규 상세 정보 카드 ─────────────────────────────── */}
+                {(() => {
+                  const isVeteran = insuCode.startsWith('G') || !!bohunCode;
+                  const hasSbrdn = !!(
+                    result.sumInsuDrug50 !== undefined ||
+                    result.sumInsuDrug80 !== undefined ||
+                    result.sumInsuDrug30 !== undefined ||
+                    result.sumInsuDrug90 !== undefined
+                  );
+                  if (!isVeteran && !hasSbrdn) return null;
+
+                  return (
+                    <Card variant="standard">
+                      <button
+                        onClick={() => setShowNewFields((v) => !v)}
+                        className="w-full flex items-center justify-between text-base font-semibold text-text-primary"
+                      >
+                        신규 상세 정보
+                        {showNewFields
+                          ? <ChevronUp className="w-4 h-4 text-text-muted" />
+                          : <ChevronDown className="w-4 h-4 text-text-muted" />}
+                      </button>
+
+                      {showNewFields && (
+                        <div className="mt-3 space-y-3">
+
+                          {/* 보훈 전용 */}
+                          {isVeteran && (
+                            <div className="space-y-2">
+                              <p className="text-xs font-semibold text-text-muted">보훈 전용</p>
+                              {result.gsCode && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm text-text-secondary">공상등구분 (gsCode)</span>
+                                  <Badge variant="info">{result.gsCode}</Badge>
+                                </div>
+                              )}
+                              {result.mt038 !== undefined && result.mt038 !== '' && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm text-text-secondary">MT038 (출력)</span>
+                                  <Badge variant="neutral">{result.mt038}</Badge>
+                                </div>
+                              )}
+                              {result.mpvaComm !== undefined && result.mpvaComm > 0 && (
+                                <ResultRow label="보훈 비급여 감면분 (mpvaComm)" value={result.mpvaComm} variant="info" />
+                              )}
+                            </div>
+                          )}
+
+                          {/* 선별급여 전용 */}
+                          {hasSbrdn && (
+                            <div className="space-y-2">
+                              <p className="text-xs font-semibold text-text-muted">선별급여 항별 약품금액</p>
+                              {result.sumInsuDrug50 !== undefined && result.sumInsuDrug50 > 0 && (
+                                <ResultRow label="A항 선별급여 50%" value={result.sumInsuDrug50} variant="neutral" />
+                              )}
+                              {result.sumInsuDrug80 !== undefined && result.sumInsuDrug80 > 0 && (
+                                <ResultRow label="B항 선별급여 80%" value={result.sumInsuDrug80} variant="neutral" />
+                              )}
+                              {result.sumInsuDrug30 !== undefined && result.sumInsuDrug30 > 0 && (
+                                <ResultRow label="D항 선별급여 30%" value={result.sumInsuDrug30} variant="neutral" />
+                              )}
+                              {result.sumInsuDrug90 !== undefined && result.sumInsuDrug90 > 0 && (
+                                <ResultRow label="E항 선별급여 90%" value={result.sumInsuDrug90} variant="neutral" />
+                              )}
+                              {result.underUser !== undefined && (
+                                <ResultRow label="선별급여 본인부담 합계 (underUser)" value={result.underUser} variant="warning" />
+                              )}
+                              {result.underInsu !== undefined && (
+                                <ResultRow label="선별급여 공단부담 합계 (underInsu)" value={result.underInsu} variant="success" />
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </Card>
+                  );
+                })()}
+
+                {/* ── 100% 본인부담 약품 섹션 ────────────────────────── */}
+                {(result.sumInsuDrug100 !== undefined ||
+                  result.sumInsuDrug100_302 !== undefined ||
+                  result.totalPrice100 !== undefined ||
+                  result.userPrice100 !== undefined ||
+                  result.pub100Price !== undefined ||
+                  result.incentive !== undefined) && (
+                  <Card variant="standard">
+                    <h3 className="text-base font-semibold text-text-primary mb-3">
+                      100% 본인부담 약품
+                    </h3>
+                    <div className="space-y-2">
+                      {result.sumInsuDrug100 !== undefined && (
+                        <ResultRow label="100% 본인부담 약품금액 (sumInsuDrug100)" value={result.sumInsuDrug100} variant="neutral" />
+                      )}
+                      {result.sumInsuDrug100_302 !== undefined && (
+                        <ResultRow label="302 공비전환 약품금액 (sumInsuDrug100_302)" value={result.sumInsuDrug100_302} variant="neutral" />
+                      )}
+                      {result.totalPrice100 !== undefined && (
+                        <ResultRow label="100% 급여비용총액 (totalPrice100)" value={result.totalPrice100} variant="primary" />
+                      )}
+                      {result.userPrice100 !== undefined && (
+                        <ResultRow label="100% 본인부담금 (userPrice100)" value={result.userPrice100} variant="warning" bold />
+                      )}
+                      {result.pub100Price !== undefined && (
+                        <ResultRow label="100% 공단부담금 (pub100Price)" value={result.pub100Price} variant="success" />
+                      )}
+                      {result.incentive !== undefined && (
+                        <ResultRow label="인센티브 (incentive)" value={result.incentive} variant="info" />
+                      )}
+                    </div>
+                  </Card>
+                )}
 
                 {/* 조제료 수가 내역 */}
                 {result.wageList.length > 0 && (
@@ -860,7 +1123,7 @@ function CheckChip({ id, label, description, checked, onChange }: CheckChipProps
   return (
     <label
       className={[
-        'flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors text-xs',
+        'flex items-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg border cursor-pointer transition-colors text-xs',
         checked
           ? 'border-primary-400 bg-primary-50 text-primary-700'
           : 'border-border-light bg-bg-surface text-text-secondary hover:bg-bg-panel',

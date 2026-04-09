@@ -33,7 +33,8 @@ export async function generateStaticParams() {
 }
 
 export async function generateMetadata({ params }: PageProps) {
-  const { slug } = await params;
+  const { slug: rawSlug } = await params;
+  const slug = decodeURIComponent(rawSlug);
   const chapter = getChapterBySlug(slug);
   if (!chapter) return { title: '챕터를 찾을 수 없습니다 — 팜에듀' };
   return {
@@ -43,7 +44,9 @@ export async function generateMetadata({ params }: PageProps) {
 }
 
 export default async function ChapterPage({ params }: PageProps) {
-  const { slug } = await params;
+  const { slug: rawSlug } = await params;
+  // Next.js 16 (Turbopack)에서 동적 라우트 파라미터의 한글이 URL 디코딩되지 않는 경우가 있어 명시적으로 처리
+  const slug = decodeURIComponent(rawSlug);
   const chapter = getChapterBySlug(slug);
 
   if (!chapter) notFound();

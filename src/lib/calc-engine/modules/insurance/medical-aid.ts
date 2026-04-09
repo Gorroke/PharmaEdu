@@ -29,7 +29,8 @@
  */
 
 import type { CalcOptions, CalcResult, InsuRate, MediIllnessInfo } from '../../types';
-import { trunc10 } from '../../rounding';
+import { trunc10, trunc100 } from '../../rounding';
+import { isV252Series } from '../special/exemption';
 
 // ─── 수급권자 유형 상수 ───────────────────────────────────────────────────────
 
@@ -131,24 +132,54 @@ export function calcMedicalAid(
     return _buildResult(result, 0, steps);
   }
 
-  // ── Step 6: B014 정률 30% (2019.01.01~) ──────────────────────────────────
+  // ── Step 6: [C-3] 의료급여 V252 경증질환 3% 차등제 ──────────────────────
+  // 근거: C# CopaymentCalculator.cs:L599-L620 IsV252ForMediAid / CalcCopay_D
+  //       99_FINAL_REPORT §4.5 C-19; ch05_verifier.md §4-2 IsV252ForMediAid
+  //
+  // 적용 조건:
+  //   - illness(MediIllnessInfo) 있음
+  //   - V252/V352/V452 시리즈
+  //   - D계열 보험코드
+  //   - D10 1종: sbrdnType이 'B'또는'M'으로 시작하는 경우만 적용
+  //   - D10 1종 기본(sbrdnType=''): 3% 미적용 (C# L721-729)
+  //   - D20 2종: 무조건 적용
+  //
+  // 산식: userPrice = max(trunc10(totalPrice × 3%), 500)
+  //       단, userPrice > totalPrice 이면 totalPrice로 cap
+  if (_isV252ForMediAid(options, illness)) {
+    let userPrice = Math.max(trunc10(totalPrice * 0.03), 500);
+    if (userPrice > totalPrice) userPrice = totalPrice;
+
+    steps.push({
+      title: '의료급여 V252 경증질환 3% 본인부담금',
+      formula: `max(trunc10(${totalPrice} × 3%), 500) = ${userPrice}원`,
+      result: userPrice,
+      unit: '원',
+    });
+
+    // ── [C-4] D타입 M20 이중감면 연동 (V252 경로) ────────────────────────
+    // 근거: C# CopaymentCalculator.cs:L606-L617
+    const m20Result = _applyDtypeM20(userPrice, options, steps);
+    return _buildResultWithMpva(result, m20Result.userPrice, m20Result.mpvaAddition, steps);
+  }
+
+  // ── Step 7: B014 정률 30% (2019.01.01~) ──────────────────────────────────
   if (sbrdnType === SbrdnType.B014 && options.dosDate >= '20190101') {
-    const userPrice = applySbrdnTypeModifier(
-      trunc10(totalPrice * 0.3),
-      SbrdnType.B014,
-      totalPrice,
-      options.dosDate
-    );
+    let userPrice = trunc10(totalPrice * 0.3);
     steps.push({
       title: '의료급여 본인부담금 (B014 — 30% 정률)',
       formula: `trunc10(${totalPrice} × 30%) = ${userPrice}원`,
       result: userPrice,
       unit: '원',
     });
-    return _buildResult(result, userPrice, steps);
+
+    // ── [C-4] D타입 M20 이중감면 연동 (B014 경로) ────────────────────────
+    // 근거: C# CopaymentCalculator.cs:L628-L641
+    const m20Result = _applyDtypeM20(userPrice, options, steps);
+    return _buildResultWithMpva(result, m20Result.userPrice, m20Result.mpvaAddition, steps);
   }
 
-  // ── Step 7: 종별 정액 적용 ───────────────────────────────────────────────
+  // ── Step 8: 종별 정액 적용 ───────────────────────────────────────────────
   const fixAmt = resolveMedicalAidFixAmount(insuCode, rate, options);
 
   let userPrice: number;
@@ -171,7 +202,12 @@ export function calcMedicalAid(
     });
   }
 
-  // ── Step 8: 건강생활유지비 차감 (1종 D10 전용) ───────────────────────────
+  // ── [C-4] D타입 M20 이중감면 연동 (기본정액 경로) ───────────────────────
+  // 근거: C# CopaymentCalculator.cs:L668-L680
+  const m20Result = _applyDtypeM20(userPrice, options, steps);
+  userPrice = m20Result.userPrice;
+
+  // ── Step 9: 건강생활유지비 차감 (1종 D10 전용) ───────────────────────────
   if (insuCode === 'D10') {
     const eHealth = options.eHealthBalance ?? 0;
     if (eHealth > 0 && userPrice > 0) {
@@ -186,7 +222,7 @@ export function calcMedicalAid(
     }
   }
 
-  return _buildResult(result, userPrice, steps);
+  return _buildResultWithMpva(result, userPrice, m20Result.mpvaAddition, steps);
 }
 
 /**
@@ -302,4 +338,132 @@ function _buildResult(
     pubPrice,
     steps: updatedSteps,
   };
+}
+
+/**
+ * CalcResult에 userPrice, pubPrice, mpvaPrice, steps를 갱신해 반환
+ * D타입 M20 이중감면 발생 시 mpvaPrice 필드도 갱신한다.
+ *
+ * @param base         기존 CalcResult
+ * @param userPrice    최종 본인부담금
+ * @param mpvaAddition 보훈청 추가 부담분 (D타입 M20 이중감면액)
+ * @param steps        누적 계산 단계
+ */
+function _buildResultWithMpva(
+  base: CalcResult,
+  userPrice: number,
+  mpvaAddition: number,
+  steps: CalcResult['steps']
+): CalcResult {
+  const mpvaPrice = (base.mpvaPrice ?? 0) + mpvaAddition;
+  const pubPrice = base.totalPrice - userPrice;
+  const insuPrice = base.totalPrice - userPrice - mpvaPrice;
+  const updatedSteps = [
+    ...steps,
+    {
+      title: '청구액',
+      formula: `${base.totalPrice} - ${userPrice}`,
+      result: pubPrice,
+      unit: '원',
+    },
+  ];
+  return {
+    ...base,
+    userPrice,
+    pubPrice,
+    mpvaPrice: mpvaAddition > 0 ? mpvaPrice : base.mpvaPrice,
+    insuPrice: mpvaAddition > 0 ? insuPrice : undefined,
+    steps: updatedSteps,
+  };
+}
+
+/**
+ * [C-3] 의료급여 V252 경증질환 3% 적용 여부 판정
+ *
+ * 근거: C# CopaymentCalculator.cs:L711-L734 IsV252ForMediAid()
+ *
+ * 조건:
+ *   - illness가 있어야 함
+ *   - V252/V352/V452 시리즈
+ *   - D계열 보험코드
+ *   - D10 1종: sbrdnType이 'B' 또는 'M'으로 시작하는 경우에만 적용
+ *   - D10 1종 기본(sbrdnType='' 등): 미적용 (C# L728-729)
+ *   - D20 2종 이상: 무조건 적용
+ */
+function _isV252ForMediAid(options: CalcOptions, illness?: MediIllnessInfo): boolean {
+  if (!illness) return false;
+  if (!isV252Series(illness.code)) return false;
+
+  const insuCode = options.insuCode.toUpperCase();
+  const category = insuCode.charAt(0);
+  if (category !== 'D') return false;
+
+  // D10 1종: sbrdnType 분기
+  // C# L721-733: B/M코드면 3% 적용, 기본(''이거나 기타)이면 미적용
+  if (insuCode === 'D10') {
+    const sbFirst = (options.sbrdnType ?? '').length > 0
+      ? (options.sbrdnType ?? '')[0]
+      : '';
+    // 'B' 또는 'M'으로 시작하는 수급권자유형이면 3% 적용
+    return sbFirst === 'B' || sbFirst === 'M';
+  }
+
+  // D20, D40, D80, D90, 기타 D계열 → 무조건 적용
+  return true;
+}
+
+/**
+ * [C-4] D타입 M20 이중감면 처리
+ *
+ * 근거: C# CopaymentCalculator.cs:L606-L617 (V252 경로)
+ *                                   L628-L641 (B014 경로)
+ *                                   L668-L680 (기본정액 경로)
+ *
+ * M20 이중감면 공식 (D타입):
+ *   truncUser = 2018이후: trunc10(user × num7/100)
+ *               2018이전: trunc100(user × num7/100)
+ *   addMpva   = user - truncUser
+ *   최종 user  = user - addMpva (= truncUser)
+ *
+ * num7 = getDoubleReductionRate('M20', dosDate) = 2018이후:10, 2018이전:20
+ *
+ * 주의: G타입 M20은 veteran.ts에서 이미 처리. 여기서는 D타입(의료급여) M20만 처리.
+ *
+ * @param baseUserPrice 이중감면 적용 전 본인부담금
+ * @param options       CalcOptions (bohunCode, dosDate)
+ * @param steps         계산 단계 로그 (push용)
+ * @returns { userPrice: 최종 환자부담, mpvaAddition: 보훈청 추가 부담분 }
+ */
+function _applyDtypeM20(
+  baseUserPrice: number,
+  options: CalcOptions,
+  steps: CalcResult['steps']
+): { userPrice: number; mpvaAddition: number } {
+  const bohunCode = options.bohunCode ?? '';
+
+  // M20이 아니면 변경 없음
+  if (bohunCode !== 'M20') {
+    return { userPrice: baseUserPrice, mpvaAddition: 0 };
+  }
+
+  const isAfter2018 = options.dosDate >= '20180101';
+  // num7: 2018이후=10, 2018이전=20 (C# GetDoubleReductionRate 참조)
+  const num7 = isAfter2018 ? 10 : 20;
+
+  // truncUser 절사방식: 2018이후=trunc10, 2018이전=trunc100
+  const truncUser = isAfter2018
+    ? trunc10(baseUserPrice * num7 / 100)
+    : trunc100(baseUserPrice * num7 / 100);
+
+  const addMpva = baseUserPrice - truncUser;
+  const finalUser = baseUserPrice - addMpva; // = truncUser
+
+  steps.push({
+    title: 'D타입 M20 이중감면',
+    formula: `addMpva=${baseUserPrice}-${isAfter2018 ? 'trunc10' : 'trunc100'}(${baseUserPrice}×${num7}/100)=${addMpva}, 최종환자=${finalUser}`,
+    result: finalUser,
+    unit: '원',
+  });
+
+  return { userPrice: finalUser, mpvaAddition: addMpva };
 }

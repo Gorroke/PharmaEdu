@@ -56,7 +56,8 @@ export async function calculate(opt: CalcOptions, repo: ICalcRepository): Promis
     const effectiveOpt: CalcOptions = { ...opt, drugList: effectiveDrugList };
 
     // ── Step 1: 약품금액 계산 ────────────────────────────────────────────
-    const { sumInsu: sumInsuDrug, sumUser: sumUserDrug } = calcDrugAmountSum(effectiveDrugList);
+    // [B-11] dosDate 전달: EXTYPE="9" 2020.03.01 날짜 분기에 사용
+    const { sumInsu: sumInsuDrug, sumUser: sumUserDrug, sectionTotals } = calcDrugAmountSum(effectiveDrugList, opt.dosDate);
 
     // ── Step 2: 조제료 계산 ──────────────────────────────────────────────
     const { wageList, sumWage } = await calcDispensingFee(effectiveOpt, repo);
@@ -81,14 +82,15 @@ export async function calculate(opt: CalcOptions, repo: ICalcRepository): Promis
         bcode: 0,
         age65_12000Less: 20,
       };
-      const copay = calcCopayment(sumInsuDrug, sumWage, effectiveOpt, fallbackRate, illnessInfo);
+      const copay = calcCopayment(sumInsuDrug, sumWage, effectiveOpt, fallbackRate, illnessInfo, sectionTotals);
       let result = buildResult(sumInsuDrug, sumUserDrug, sumWage, wageList, copay);
       result = applyPostProcessing(result, effectiveOpt, sum648, surcharge648);
+      result = { ...result, formNumber: determineFormNumber(opt.insuCode, opt.isDirectDispensing) };
       return result;
     }
 
     // ── Step 4: 본인부담금 계산 (보험유형별 모듈 위임) ──────────────────
-    const copay = calcCopayment(sumInsuDrug, sumWage, effectiveOpt, rate, illnessInfo);
+    const copay = calcCopayment(sumInsuDrug, sumWage, effectiveOpt, rate, illnessInfo, sectionTotals);
 
     let result = buildResult(sumInsuDrug, sumUserDrug, sumWage, wageList, copay);
 
@@ -99,6 +101,12 @@ export async function calculate(opt: CalcOptions, repo: ICalcRepository): Promis
 
     // ── Step 5/6: 후처리 (648 가산 + 상한제) ─────────────────────────
     result = applyPostProcessing(result, effectiveOpt, sum648, surcharge648);
+
+    // ── Step 7: 서식번호 결정 (B-6) ──────────────────────────────────
+    result = {
+      ...result,
+      formNumber: determineFormNumber(opt.insuCode, opt.isDirectDispensing),
+    };
 
     return result;
 
@@ -164,12 +172,12 @@ function buildResult(
   wageList: import('./types').WageListItem[],
   copay: import('./copayment').CopayResult
 ): CalcResult {
-  // sumUserDrug: 비급여 약가 합계 (향후 sumInsuDrug100 등에 활용)
-  void sumUserDrug;
-
   const result: CalcResult = {
     sumInsuDrug,
     sumWage,
+    // [C-9] MpvaComm 산출용: 비급여 약품 합계를 CalcResult에 보존
+    // 근거: CopaymentCalculator.cs:L1207-L1208 (SumUserDrug + SumWageComm)
+    sumUserDrug,
     totalPrice: copay.totalPrice,
     userPrice: copay.userPrice,
     pubPrice: copay.pubPrice,
@@ -190,9 +198,41 @@ function buildResult(
       ...copay.steps,
     ],
   };
-  // 3자배분 필드 전달 (보훈 등)
+
+  // ── 3자배분 필드 전달 (보훈 등) ──────────────────────────────────────────
   if (copay.mpvaPrice !== undefined) result.mpvaPrice = copay.mpvaPrice;
   if (copay.insuPrice !== undefined) result.insuPrice = copay.insuPrice;
+
+  // ── B-9/B-10: GsCode, MT038 전달 ────────────────────────────────────────
+  if (copay.gsCode !== undefined) result.gsCode = copay.gsCode;
+  if (copay.mt038  !== undefined) result.mt038  = copay.mt038;
+
+  // ── [B-2] 선별급여 항별 합계 + UnderUser/UnderInsu ──────────────────────
+  if (copay.sumInsuDrug50 !== undefined) result.sumInsuDrug50 = copay.sumInsuDrug50;
+  if (copay.sumInsuDrug80 !== undefined) result.sumInsuDrug80 = copay.sumInsuDrug80;
+  if (copay.sumInsuDrug30 !== undefined) result.sumInsuDrug30 = copay.sumInsuDrug30;
+  if (copay.sumInsuDrug90 !== undefined) result.sumInsuDrug90 = copay.sumInsuDrug90;
+  if (copay.underUser !== undefined) result.underUser = copay.underUser;
+  if (copay.underInsu !== undefined) result.underInsu = copay.underInsu;
+
+  // ── [B-3] U항 100/100 + 요양급여비용총액2 ───────────────────────────────
+  if (copay.sumInsuDrug100 !== undefined) result.sumInsuDrug100 = copay.sumInsuDrug100;
+  if (copay.totalPrice100  !== undefined) result.totalPrice100  = copay.totalPrice100;
+  if (copay.userPrice100   !== undefined) result.userPrice100   = copay.userPrice100;
+  if (copay.totalPrice2    !== undefined) result.totalPrice2    = copay.totalPrice2;
+
+  // ── [B-4] RealPrice / SumUser / SumInsure ──────────────────────────────
+  if (copay.realPrice  !== undefined) result.realPrice  = copay.realPrice;
+  if (copay.sumUser    !== undefined) result.sumUser    = copay.sumUser;
+  if (copay.sumInsure  !== undefined) result.sumInsure  = copay.sumInsure;
+
+  // ── [B-5] 특수공비 재배분 결과 ──────────────────────────────────────────
+  if (copay.pub100Price !== undefined) result.pub100Price = copay.pub100Price;
+
+  // ── [C-9] MpvaComm 보훈 비급여 감면분 전달 ──────────────────────────────
+  // 근거: CopaymentCalculator.cs:L1182-L1217, L284
+  if (copay.mpvaComm !== undefined) result.mpvaComm = copay.mpvaComm;
+
   return result;
 }
 
@@ -207,4 +247,36 @@ function errorResult(message: string): CalcResult {
     steps: [],
     error: message,
   };
+}
+
+/**
+ * 전자청구 서식번호 결정 (B-6)
+ *
+ * 처방조제/직접조제 여부 × 보험유형(건강보험/의료급여)으로 서식번호를 결정한다.
+ *
+ * | 조제방식  | 보험유형   | 서식번호 |
+ * |----------|-----------|--------|
+ * | 처방조제  | 건강보험   | H024   |
+ * | 처방조제  | 의료급여   | H124   |
+ * | 직접조제  | 건강보험   | H025   |
+ * | 직접조제  | 의료급여   | H125   |
+ *
+ * 근거: CH10 §Step1-2, ch10_verifier.md §3.3
+ *
+ * @param insuCode 보험코드 (C10/D10/G10 등) — 첫 글자 C=건강보험, D=의료급여
+ * @param isDirectDispensing 직접조제 여부 (true=직접조제, false/undefined=처방조제)
+ * @returns 서식번호 ('H024' | 'H124' | 'H025' | 'H125')
+ */
+export function determineFormNumber(
+  insuCode: string,
+  isDirectDispensing?: boolean,
+): string {
+  // 보험유형 판별: D 계열 → 의료급여, 그 외 → 건강보험
+  const isMedicalAid = insuCode.charAt(0).toUpperCase() === 'D';
+  const isDirect = isDirectDispensing === true;
+
+  if (!isDirect && !isMedicalAid) return 'H024'; // 처방조제 × 건강보험
+  if (!isDirect && isMedicalAid)  return 'H124'; // 처방조제 × 의료급여
+  if (isDirect  && !isMedicalAid) return 'H025'; // 직접조제  × 건강보험
+  return 'H125';                                  // 직접조제  × 의료급여
 }

@@ -142,10 +142,39 @@ export function markReadPercent(slug: string, pct: number): void {
 }
 
 /**
- * 퀴즈 통과를 기록한다.
+ * 퀴즈 통과를 기록한다 (legacy — lesson 전체 단위).
+ * 인라인 KC 통과는 markKCPassed() 로 추적하는 것을 권장.
  */
 export function markQuizPassed(slug: string): void {
   updateLessonProgress(slug, { quizPassed: true });
+}
+
+/**
+ * 인라인 KnowledgeCheck 한 개의 통과를 기록한다.
+ * passedKCs 배열에 checkId 를 추가 (중복 제거). 최초 1개 통과 시 quizPassed=true 도 함께 마크한다.
+ */
+export function markKCPassed(slug: string, checkId: string): void {
+  if (!checkId) return;
+  const existing = getLessonProgress(slug);
+  const set = new Set(existing.passedKCs ?? []);
+  if (set.has(checkId)) return; // 이미 기록됨 — no-op
+  set.add(checkId);
+  updateLessonProgress(slug, {
+    passedKCs: Array.from(set),
+    quizPassed: true,
+  });
+}
+
+/**
+ * 특정 lesson 의 모든 KC 가 통과되었는지 확인한다.
+ * @param slug lesson slug
+ * @param allKcIds 이 lesson 에 포함된 전체 KC checkId 목록 (page/StepView 가 segments 에서 추출)
+ * @returns allKcIds 가 비어있으면 true (KC 없는 lesson). 그 외에는 모두 통과 시 true.
+ */
+export function areAllKCsPassed(slug: string, allKcIds: string[]): boolean {
+  if (!allKcIds || allKcIds.length === 0) return true;
+  const passed = new Set(getLessonProgress(slug).passedKCs ?? []);
+  return allKcIds.every((id) => passed.has(id));
 }
 
 /**

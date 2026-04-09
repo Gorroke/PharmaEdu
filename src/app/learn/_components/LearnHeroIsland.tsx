@@ -64,26 +64,26 @@ export function LearnHeroIsland({ lessons }: LearnHeroIslandProps) {
         </div>
 
         {/* 오른쪽: 스탯 카드 3개 */}
-        <div className="grid grid-cols-3 gap-3 lg:w-72">
+        <div className="grid grid-cols-3 gap-2 sm:gap-3 lg:w-72">
           {/* 진도율 */}
-          <div className="bg-white/20 rounded-xl p-3 text-center">
-            <p className="text-2xl font-extrabold leading-none">
+          <div className="bg-white/20 rounded-xl p-2 sm:p-3 text-center">
+            <p className="text-xl sm:text-2xl font-extrabold leading-none">
               {hydrated ? `${progressPct}%` : '—'}
             </p>
             <p className="text-xs opacity-70 mt-1">전체 진도</p>
           </div>
 
           {/* 완료 레슨 */}
-          <div className="bg-white/20 rounded-xl p-3 text-center">
-            <p className="text-2xl font-extrabold leading-none">
+          <div className="bg-white/20 rounded-xl p-2 sm:p-3 text-center">
+            <p className="text-xl sm:text-2xl font-extrabold leading-none">
               {hydrated ? `${completedCount}/${totalCount}` : `—/${totalCount}`}
             </p>
             <p className="text-xs opacity-70 mt-1">완료 레슨</p>
           </div>
 
           {/* 남은 예상 시간 */}
-          <div className="bg-white/20 rounded-xl p-3 text-center">
-            <p className="text-2xl font-extrabold leading-none">
+          <div className="bg-white/20 rounded-xl p-2 sm:p-3 text-center">
+            <p className="text-xl sm:text-2xl font-extrabold leading-none">
               {hydrated
                 ? (() => {
                     const state = getLearningState();

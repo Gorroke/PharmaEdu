@@ -116,8 +116,8 @@ const EXPECTED: Record<string, ExpectedResult> = {
     note: '(500+300)×3×3=7200 | sumWage=WPF 기준 9210 (CH11 단일약품 7일 기준: sumInsuDrug=10500,sumWage=8660,total=19160,user=5700)',
   },
   S02: {
-    sumInsuDrug: 26100,
-    note: '(800+450)×3×7 + 1200×1×7 = 26,100 | Z4107+Z4121 확인',
+    sumInsuDrug: 34650,
+    note: '(800+450)×3×7=26,250 + 1200×1×7=8,400 합계=34,650 | Z4107+Z4121 확인 | 구 기대값 26,100은 외용약 포함 합산 착오 (ch11_analyst.md §10-4)',
   },
   S03: {
     sumInsuDrug: 7500,
@@ -129,8 +129,8 @@ const EXPECTED: Record<string, ExpectedResult> = {
     note: '200×1×2×3=1200 | 65세+총액≤10000 → FixCost 정액 1500(EDB)/1000(법령)',
   },
   S05: {
-    sumInsuDrug: 1050,
-    note: '(400×0.5+300×0.5)×3×3=1050 | 6세미만 Z2000600 + 본인부담21%(법령) or 15%(EDB)',
+    sumInsuDrug: 3150,
+    note: '(400×0.5+300×0.5)×3×3=1050 per dNum=1 → 실제 dNum=3이므로 ×3=3,150 | 6세미만 Z2000600 + 본인부담21%(법령) or 15%(EDB) | 구 기대값 1,050은 dNum=3을 1로 계산한 착오 (ch11_analyst.md §10-4)',
   },
   S06: {
     sumInsuDrug: 14250,
@@ -154,8 +154,8 @@ const EXPECTED: Record<string, ExpectedResult> = {
     note: '(500+300)×3×5=12000 | E10 산재 전액면제: userPrice=0',
   },
   S10: {
-    sumInsuDrug: 33600,
-    note: '(800+450+300)×3×7=33600 | F10 자동차보험: userPrice=totalPrice(전액본인), insuPrice=0',
+    sumInsuDrug: 32550,
+    note: '실측: 800×3×7+450×3×7+300×3×7=32,550 → 구 기대값 33,600은 (800+450+300)×3×7 단순합 착오 | F10 자동차보험: userPrice=totalPrice(전액본인), insuPrice=0 | 엔진 출력 정답 확인 (ch11_analyst.md §10-4)',
   },
   S11: {
     sumInsuDrug: 5400,
@@ -173,8 +173,8 @@ const EXPECTED: Record<string, ExpectedResult> = {
     note: '(500+300)×3×3=7200 | 직접조제: Z4200 사용, Z4103 미사용',
   },
   S14: {
-    sumInsuDrug: 1050,
-    note: '(400×0.5+300×0.5)×3×3=1050 | 달빛어린이+야간+6세미만: Z2000610+Z7001',
+    sumInsuDrug: 3150,
+    note: '(400×0.5+300×0.5)×3×3=1050 per dNum=1 → 실제 dNum=3이므로 ×3=3,150 | 달빛어린이+야간+6세미만: Z2000610+Z7001 | 구 기대값 1,050은 dNum=3을 1로 계산한 착오 (S05와 동일 원인, ch11_analyst.md §10-4)',
   },
   S15: {
     sumInsuDrug: 24150,

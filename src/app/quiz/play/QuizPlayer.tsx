@@ -2,13 +2,17 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { CheckCircle, XCircle, ChevronRight, RotateCcw, Home } from 'lucide-react';
+import { CheckCircle, XCircle, ChevronRight, RotateCcw, Home, Calculator, Lightbulb, BookOpen } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import type { QuizQuestion } from '@/lib/quiz/types';
 import { DIFFICULTY_LABEL, DIFFICULTY_VARIANT } from '@/lib/quiz/types';
 import { saveQuizHistory } from '@/lib/quiz/history';
+import { addWrongAnswer, markResolved, getWrongAnswers } from '@/lib/quiz/wrong-notes';
+import { MiniCalculator } from '@/components/quiz/MiniCalculator';
+import { QUESTION_RENDERERS } from '@/lib/quiz/renderers';
+import { evaluateAnswer } from '@/lib/quiz/evaluator';
 
 interface QuizPlayerProps {
   questions: QuizQuestion[];
@@ -21,14 +25,25 @@ type AnswerState = 'idle' | 'correct' | 'incorrect';
 
 export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
+  /**
+   * 통합 사용자 답변 상태 (P1-E 리팩터).
+   * 직렬화 문자열로 보관 — multiple_choice/true_false 는 인덱스 문자열,
+   * numeric 은 raw 입력, 그 외 신규 타입은 JSON/CSV 직렬화 형태.
+   */
   const [userAnswer, setUserAnswer] = useState('');
-  const [numericInput, setNumericInput] = useState('');
   const [answerState, setAnswerState] = useState<AnswerState>('idle');
   const [score, setScore] = useState(0);
   const [isFinished, setIsFinished] = useState(false);
   /** 카드 전환 애니메이션 트리거 */
   const [cardKey, setCardKey] = useState(0);
   const historySaved = useRef(false);
+  /** 계산기 표시 여부 (numeric 문제에서만 사용) */
+  const [showCalc, setShowCalc] = useState(false);
+  /** 공개된 힌트 개수 (P0-D) */
+  const [revealedHints, setRevealedHints] = useState(0);
+  /** 용어집 popover 열림 (P0-D) */
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const glossaryRef = useRef<HTMLDivElement>(null);
 
   const question = questions[currentIndex];
   const total = questions.length;
@@ -64,7 +79,7 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
         if (answerState === 'idle') {
           const canSubmit = isMultipleChoice
             ? userAnswer !== ''
-            : numericInput.trim() !== '';
+            : userAnswer.trim() !== '';
           if (canSubmit) handleCheckAnswer();
         } else {
           handleNext();
@@ -75,7 +90,25 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [question, answerState, userAnswer, numericInput]);
+  }, [question, answerState, userAnswer]);
+
+  // ── 문제 변경 시 힌트/용어집 상태 리셋 (P0-D) ────────────
+  useEffect(() => {
+    setRevealedHints(0);
+    setGlossaryOpen(false);
+  }, [question?.id]);
+
+  // ── 용어집 click-outside 처리 (P0-D) ──────────────────────
+  useEffect(() => {
+    if (!glossaryOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (glossaryRef.current && !glossaryRef.current.contains(e.target as Node)) {
+        setGlossaryOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [glossaryOpen]);
 
   // ── 히스토리 저장 (완료 시 1회) ────────────────────────────
   useEffect(() => {
@@ -91,20 +124,49 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
     }
   }, [isFinished, category, title, score, total]);
 
-  const handleChoiceSelect = useCallback((idx: number) => {
+  /** 렌더러가 호출하는 통합 onChange — 채점 후엔 무시 */
+  const handleAnswerChange = useCallback((value: string) => {
     if (answerState !== 'idle') return;
-    setUserAnswer(String(idx));
+    setUserAnswer(value);
   }, [answerState]);
 
   const handleCheckAnswer = useCallback(() => {
     if (!question) return;
+    // 이미 채점된 상태면 재호출 무시 (중복 기록 방지)
+    if (answerState !== 'idle') return;
     const answer =
-      question.question_type === 'numeric' ? numericInput.trim() : userAnswer;
+      question.question_type === 'numeric' ? userAnswer.trim() : userAnswer;
     if (!answer) return;
-    const isCorrect = answer === question.correct_answer;
+    const isCorrect = evaluateAnswer(answer, question);
     setAnswerState(isCorrect ? 'correct' : 'incorrect');
     if (isCorrect) setScore((s) => s + 1);
-  }, [question, userAnswer, numericInput]);
+
+    // ── 오답 노트 연동 (P1-G) ─────────────────────────────────
+    // 동적 문제(string id)는 wrong-notes에 기록하지 않음. QuizPlayer는 정적 문제만 사용하므로 number id 보장.
+    if (typeof question.id === 'number') {
+      if (!isCorrect) {
+        const existing = getWrongAnswers().find((e) => e.questionId === question.id);
+        addWrongAnswer({
+          questionId: question.id,
+          question: question.question,
+          correctAnswer: question.correct_answer,
+          userAnswer: answer,
+          explanation: question.explanation ?? '',
+          chapter: question.chapter,
+          difficulty: question.difficulty,
+          timestamp: Date.now(),
+          attempts: existing ? existing.attempts + 1 : 1,
+          resolved: false,
+        });
+      } else {
+        // 정답 시: 기존 오답 항목이 있으면 해결 처리
+        const existing = getWrongAnswers().find((e) => e.questionId === question.id);
+        if (existing && !existing.resolved) {
+          markResolved(question.id);
+        }
+      }
+    }
+  }, [question, userAnswer, answerState]);
 
   const handleNext = useCallback(() => {
     if (currentIndex + 1 >= total) {
@@ -112,8 +174,8 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
     } else {
       setCurrentIndex((i) => i + 1);
       setUserAnswer('');
-      setNumericInput('');
       setAnswerState('idle');
+      setShowCalc(false); // 다음 문제에서 계산기 초기 접힘
       setCardKey((k) => k + 1); // 카드 페이드-인 트리거
     }
   }, [currentIndex, total]);
@@ -121,10 +183,10 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
   const handleRestart = useCallback(() => {
     setCurrentIndex(0);
     setUserAnswer('');
-    setNumericInput('');
     setAnswerState('idle');
     setScore(0);
     setIsFinished(false);
+    setShowCalc(false);
     setCardKey(0);
     historySaved.current = false;
   }, []);
@@ -190,10 +252,14 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
 
   // ── 문제 화면 ─────────────────────────────────────────────
   const isAnswered = answerState !== 'idle';
+  const isCorrect = answerState === 'correct' ? true : answerState === 'incorrect' ? false : null;
   const isMultipleChoice =
     question.question_type === 'multiple_choice' ||
     question.question_type === 'true_false';
-  const canSubmit = isMultipleChoice ? userAnswer !== '' : numericInput.trim() !== '';
+  const isNumeric = question.question_type === 'numeric';
+  const canSubmit = isMultipleChoice ? userAnswer !== '' : userAnswer.trim() !== '';
+  // 팩토리에서 렌더러 조회 — 등록되지 않은 신규 타입은 P1-F가 채울 예정
+  const Renderer = QUESTION_RENDERERS[question.question_type];
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-8 space-y-6">
@@ -231,6 +297,10 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
             to   { opacity: 1; transform: translateY(0); }
           }
           .animate-fadeIn { animation: fadeIn 0.25s ease-out; }
+          @keyframes slideUp {
+            from { transform: translateY(100%); }
+            to   { transform: translateY(0); }
+          }
         `}</style>
 
         <Card variant="standard" className="space-y-4">
@@ -247,90 +317,290 @@ export function QuizPlayer({ questions, title, category = 'random' }: QuizPlayer
             ))}
           </div>
 
+          {/* 참고 약품 chips (P0-D) */}
+          {question.drug_refs && question.drug_refs.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-text-muted">
+              <span className="font-medium">참고 약품:</span>
+              {question.drug_refs.map((d) => (
+                <span
+                  key={d.code}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-neutral-100 border border-border-light"
+                >
+                  <span className="font-mono text-text-secondary">[{d.code}]</span>
+                  <span className="text-text-primary">{d.name}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           {/* 문제 텍스트 */}
           <p className="text-text-primary font-medium leading-relaxed">
             {question.question}
           </p>
 
-          {/* 선택지 또는 입력창 */}
-          {isMultipleChoice && question.choices ? (
-            <div className="space-y-2.5 pt-1" role="radiogroup" aria-label="선택지">
-              {question.choices.map((choice, idx) => {
-                const isSelected = userAnswer === String(idx);
-                const isCorrectChoice =
-                  isAnswered && String(idx) === question.correct_answer;
-                const isWrongSelected = isAnswered && isSelected && !isCorrectChoice;
-
-                return (
+          {/* 힌트 / 용어집 컨트롤 영역 (P0-D) */}
+          {!isAnswered &&
+            ((question.hints && question.hints.length > 0) ||
+              (question.code_glossary && question.code_glossary.length > 0)) && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                {question.hints && question.hints.length > 0 && (
                   <button
-                    key={idx}
-                    onClick={() => handleChoiceSelect(idx)}
-                    disabled={isAnswered}
-                    aria-checked={isSelected}
-                    role="radio"
+                    type="button"
+                    onClick={() =>
+                      setRevealedHints((n) =>
+                        Math.min(n + 1, question.hints!.length)
+                      )
+                    }
+                    disabled={revealedHints >= question.hints.length}
+                    aria-label={`힌트 보기 (${Math.min(
+                      revealedHints + 1,
+                      question.hints.length
+                    )} / ${question.hints.length})`}
                     className={[
-                      // 모바일 터치 타깃 최소 44px (py-3 = 12px*2 + text ≈ 44px)
-                      'w-full text-left px-4 py-3 rounded-xl border text-sm transition-all duration-150',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2',
-                      'active:scale-[0.99]',
-                      isCorrectChoice
-                        ? 'bg-success-100 border-success-500 text-success-500 font-medium'
-                        : isWrongSelected
-                        ? 'bg-error-100 border-error-500 text-error-500'
-                        : isSelected && !isAnswered
-                        ? 'bg-primary-50 border-primary-500 text-primary-600 font-medium'
-                        : 'bg-bg-surface border-border-light text-text-primary hover:bg-neutral-50 hover:border-neutral-300',
-                      isAnswered ? 'cursor-default' : 'cursor-pointer',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                      'inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold',
+                      'transition-all duration-150 border',
+                      revealedHints >= question.hints.length
+                        ? 'bg-neutral-100 border-neutral-200 text-text-muted cursor-not-allowed'
+                        : 'bg-warning-100 border-warning-500 text-warning-500 hover:brightness-95',
+                    ].join(' ')}
                   >
-                    <span className="font-mono text-text-muted mr-2 select-none">
-                      {String.fromCharCode(9312 + idx)}
-                    </span>
-                    {choice}
-                    {isCorrectChoice && (
-                      <CheckCircle className="inline w-4 h-4 ml-2 text-success-500" />
-                    )}
-                    {isWrongSelected && (
-                      <XCircle className="inline w-4 h-4 ml-2 text-error-500" />
-                    )}
+                    <Lightbulb className="w-3 h-3" />
+                    {revealedHints >= question.hints.length
+                      ? `힌트 모두 공개 (${question.hints.length}/${question.hints.length})`
+                      : `힌트 보기 (${revealedHints + 1}/${question.hints.length})`}
                   </button>
-                );
-              })}
+                )}
+
+                {question.code_glossary && question.code_glossary.length > 0 && (
+                  <div className="relative" ref={glossaryRef}>
+                    <button
+                      type="button"
+                      onClick={() => setGlossaryOpen((v) => !v)}
+                      aria-expanded={glossaryOpen}
+                      aria-label="용어 보기"
+                      className={[
+                        'inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold',
+                        'transition-all duration-150 border',
+                        glossaryOpen
+                          ? 'bg-primary-500 border-primary-600 text-white shadow-sm'
+                          : 'bg-neutral-100 border-neutral-300 text-text-secondary hover:bg-neutral-200',
+                      ].join(' ')}
+                    >
+                      <BookOpen className="w-3 h-3" />
+                      용어 보기
+                    </button>
+                    {glossaryOpen && (
+                      <div
+                        role="dialog"
+                        className="absolute left-0 sm:left-auto sm:right-0 mt-2 w-72 max-w-[90vw] z-50 bg-bg-surface border border-border-medium rounded-lg shadow-sm p-3 space-y-2"
+                      >
+                        {question.code_glossary.map((g) => (
+                          <div
+                            key={g.code}
+                            className="text-xs border-b border-border-light last:border-b-0 pb-2 last:pb-0"
+                          >
+                            <div className="flex items-baseline gap-2">
+                              <span className="font-mono font-bold text-text-primary">
+                                {g.code}
+                              </span>
+                              <span className="text-text-secondary">{g.name}</span>
+                            </div>
+                            {g.note && (
+                              <p className="text-text-muted mt-0.5 leading-relaxed">
+                                {g.note}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+          {/* 공개된 힌트 패널 (P0-D) */}
+          {!isAnswered && revealedHints > 0 && question.hints && (
+            <div
+              className="rounded-lg shadow-sm border border-warning-500/40 bg-warning-100/60 p-3 space-y-1.5"
+              style={{ animation: 'fadeIn 0.2s ease-out' }}
+            >
+              {question.hints.slice(0, revealedHints).map((h, i) => (
+                <div key={i} className="flex items-start gap-2 text-sm text-text-primary">
+                  <Lightbulb className="w-4 h-4 text-warning-500 flex-shrink-0 mt-0.5" />
+                  <p className="leading-relaxed">
+                    <span className="font-semibold mr-1">힌트 {i + 1}.</span>
+                    {h}
+                  </p>
+                </div>
+              ))}
             </div>
-          ) : (
-            /* 숫자 입력 */
-            <div className="pt-1 space-y-2">
-              <label className="text-sm text-text-secondary" htmlFor="numeric-answer">
-                답을 숫자로 입력하세요 (단위 없이 숫자만)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  id="numeric-answer"
-                  type="text"
-                  inputMode="numeric"
-                  value={numericInput}
-                  onChange={(e) => setNumericInput(e.target.value)}
-                  disabled={isAnswered}
-                  placeholder="예: 5700"
+          )}
+
+          {/* 객관식 — 계산기 토글 (선택지 아래로 이동: P1-7) */}
+
+          {/* 선택지 또는 입력창 — P1-E: 팩토리 렌더러로 위임 */}
+          {isMultipleChoice && question.choices ? (
+            <>
+            {Renderer && (
+              <Renderer
+                question={question}
+                userAnswer={userAnswer}
+                isAnswered={isAnswered}
+                isCorrect={isCorrect}
+                onChange={handleAnswerChange}
+                onSubmit={handleCheckAnswer}
+              />
+            )}
+
+            {/* 객관식 계산기 토글 — 선택지 아래 (P1-7) */}
+            {!isAnswered && (
+              <div className="flex items-center justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowCalc((v) => !v)}
                   className={[
-                    'flex-1 px-4 py-3 rounded-xl border text-sm',
-                    'focus:outline-none focus:ring-2 focus:ring-primary-500',
-                    'disabled:bg-neutral-50 disabled:cursor-default',
-                    isAnswered && numericInput === question.correct_answer
-                      ? 'border-success-500 bg-success-100'
-                      : isAnswered
-                      ? 'border-error-500 bg-error-100'
-                      : 'border-border-light bg-bg-surface',
+                    'inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold',
+                    'transition-all duration-150 border',
+                    showCalc
+                      ? 'bg-primary-500 border-primary-600 text-white hover:bg-primary-600 shadow-sm'
+                      : 'bg-neutral-100 border-neutral-300 text-text-secondary hover:bg-neutral-200',
                   ]
                     .filter(Boolean)
                     .join(' ')}
-                />
+                  aria-expanded={showCalc}
+                  aria-label={showCalc ? '계산기 숨기기' : '계산기 표시'}
+                >
+                  <Calculator className="w-3 h-3" />
+                  {showCalc ? '계산기 닫기' : '계산기'}
+                </button>
               </div>
-              {isAnswered && numericInput !== question.correct_answer && (
-                <p className="text-sm text-success-500 font-medium">
-                  정답: {question.correct_answer}
+            )}
+
+            {/* 객관식 계산기 위젯 — P2 모바일 drawer / PC 인라인 */}
+            {showCalc && !isAnswered && (
+              <>
+                {/* 모바일 dim 오버레이 */}
+                <div
+                  className="sm:hidden fixed inset-0 bg-neutral-900/40 z-[55]"
+                  onClick={() => setShowCalc(false)}
+                />
+                {/* 모바일 bottom drawer */}
+                <div className="sm:hidden fixed bottom-0 left-0 right-0 z-[60] bg-bg-surface rounded-t-2xl shadow-lg"
+                  style={{
+                    paddingBottom: 'calc(1.5rem + env(safe-area-inset-bottom))',
+                    animation: 'slideUp 0.2s ease-out',
+                  }}
+                >
+                  <div className="w-8 h-1 bg-neutral-300 rounded-full mx-auto mt-3 mb-1" />
+                  <div className="px-4">
+                    <MiniCalculator onClose={() => setShowCalc(false)} />
+                  </div>
+                </div>
+                {/* PC 인라인 (sm 이상) */}
+                <div
+                  className="hidden sm:flex justify-end"
+                  style={{ animation: 'fadeIn 0.15s ease-out' }}
+                >
+                  <div className="w-64 flex-shrink-0">
+                    <MiniCalculator onClose={() => setShowCalc(false)} />
+                  </div>
+                </div>
+              </>
+            )}
+            </>
+          ) : isNumeric ? (
+            /* 숫자 입력 — 셸은 라벨/계산기 토글/위젯만 담당, 입력창은 NumericRenderer */
+            <div className="pt-1 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm text-text-secondary" htmlFor="numeric-answer">
+                  답을 숫자로 입력하세요 (단위 없이 숫자만)
+                </label>
+                {/* 계산기 토글 버튼 (P0-2 통일 스타일) */}
+                <button
+                  type="button"
+                  onClick={() => setShowCalc((v) => !v)}
+                  className={[
+                    'inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold',
+                    'transition-all duration-150 border',
+                    showCalc
+                      ? 'bg-primary-500 border-primary-600 text-white hover:bg-primary-600 shadow-sm'
+                      : 'bg-neutral-100 border-neutral-300 text-text-secondary hover:bg-neutral-200',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  aria-expanded={showCalc}
+                  aria-label={showCalc ? '계산기 숨기기' : '계산기 표시'}
+                >
+                  <Calculator className="w-3 h-3" />
+                  {showCalc ? '계산기 닫기' : '계산기'}
+                </button>
+              </div>
+
+              {/* 답안 입력창 — P1-E: NumericRenderer로 위임 */}
+              {Renderer && (
+                <Renderer
+                  question={question}
+                  userAnswer={userAnswer}
+                  isAnswered={isAnswered}
+                  isCorrect={isCorrect}
+                  onChange={handleAnswerChange}
+                  onSubmit={handleCheckAnswer}
+                />
+              )}
+
+              {/* 계산기 위젯 — P2 모바일 drawer / PC 인라인 */}
+              {showCalc && !isAnswered && (
+                <>
+                  {/* 모바일 dim 오버레이 */}
+                  <div
+                    className="sm:hidden fixed inset-0 bg-neutral-900/40 z-[55]"
+                    onClick={() => setShowCalc(false)}
+                  />
+                  {/* 모바일 bottom drawer */}
+                  <div
+                    className="sm:hidden fixed bottom-0 left-0 right-0 z-[60] bg-bg-surface rounded-t-2xl shadow-lg"
+                    style={{
+                      paddingBottom: 'calc(1.5rem + env(safe-area-inset-bottom))',
+                      animation: 'slideUp 0.2s ease-out',
+                    }}
+                  >
+                    <div className="w-8 h-1 bg-neutral-300 rounded-full mx-auto mt-3 mb-1" />
+                    <div className="px-4">
+                      <MiniCalculator
+                        onUseResult={(val) => handleAnswerChange(val)}
+                        onClose={() => setShowCalc(false)}
+                      />
+                    </div>
+                  </div>
+                  {/* PC 인라인 (sm 이상) */}
+                  <div
+                    className="hidden sm:block sm:w-64 sm:flex-shrink-0"
+                    style={{ animation: 'fadeIn 0.15s ease-out' }}
+                  >
+                    <MiniCalculator
+                      onUseResult={(val) => handleAnswerChange(val)}
+                      onClose={() => setShowCalc(false)}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            /* 신규 타입 (matching/ordering/fill_blank/error_spot/multi_step) — 렌더러에 전적 위임 */
+            <div className="pt-1">
+              {Renderer ? (
+                <Renderer
+                  question={question}
+                  userAnswer={userAnswer}
+                  isAnswered={isAnswered}
+                  isCorrect={isCorrect}
+                  onChange={handleAnswerChange}
+                  onSubmit={handleCheckAnswer}
+                />
+              ) : (
+                <p className="text-sm text-text-muted">
+                  지원되지 않는 문제 유형입니다: {question.question_type}
                 </p>
               )}
             </div>

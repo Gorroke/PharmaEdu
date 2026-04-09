@@ -11,6 +11,7 @@ import { DIFFICULTY_LABEL, DIFFICULTY_VARIANT } from '@/lib/quiz/types';
 import { getTodayRecord, saveDailyRecord, calculateStats, getDailyRecords } from '@/lib/daily/storage';
 import { getTodayKST } from '@/lib/daily/date';
 import type { DailyStats } from '@/lib/daily/types';
+import { addWrongAnswer, markResolved, getWrongAnswers } from '@/lib/quiz/wrong-notes';
 
 interface DailyPlayerProps {
   question: QuizQuestion;
@@ -48,6 +49,8 @@ export function DailyPlayer({ question }: DailyPlayerProps) {
   );
 
   const handleCheckAnswer = useCallback(() => {
+    // 이미 채점된 상태면 재호출 무시 (중복 기록 방지)
+    if (isAnswered) return;
     const answer = isMultipleChoice ? userAnswer : numericInput.trim();
     if (!answer) return;
 
@@ -65,7 +68,32 @@ export function DailyPlayer({ question }: DailyPlayerProps) {
     // 저장 후 stats 재계산
     const records = getDailyRecords();
     setStats(calculateStats(records));
-  }, [isMultipleChoice, userAnswer, numericInput, question]);
+
+    // ── 오답 노트 연동 (P1-G) ─────────────────────────────────
+    // DailyPlayer는 정적 QuizQuestion(number id)만 사용하므로 안전.
+    if (typeof question.id === 'number') {
+      if (!isCorrect) {
+        const existing = getWrongAnswers().find((e) => e.questionId === question.id);
+        addWrongAnswer({
+          questionId: question.id,
+          question: question.question,
+          correctAnswer: question.correct_answer,
+          userAnswer: answer,
+          explanation: question.explanation ?? '',
+          chapter: question.chapter,
+          difficulty: question.difficulty,
+          timestamp: Date.now(),
+          attempts: existing ? existing.attempts + 1 : 1,
+          resolved: false,
+        });
+      } else {
+        const existing = getWrongAnswers().find((e) => e.questionId === question.id);
+        if (existing && !existing.resolved) {
+          markResolved(question.id);
+        }
+      }
+    }
+  }, [isMultipleChoice, userAnswer, numericInput, question, isAnswered]);
 
   const handleShowResult = useCallback(() => {
     setPhase('result');
@@ -276,7 +304,7 @@ export function DailyPlayer({ question }: DailyPlayerProps) {
               disabled={isAnswered}
               placeholder="예: 5700"
               className={[
-                'w-full px-4 py-2.5 rounded-lg border text-sm',
+                'w-full px-4 py-3 min-h-[44px] rounded-lg border text-sm',
                 'focus:outline-none focus:ring-2 focus:ring-primary-500',
                 'disabled:bg-neutral-50 disabled:cursor-default',
                 isAnswered && numericInput === question.correct_answer

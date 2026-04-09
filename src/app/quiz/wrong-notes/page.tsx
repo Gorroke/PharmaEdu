@@ -126,7 +126,7 @@ function WrongNoteCard({ entry, onDelete }: WrongNoteCardProps) {
         <div>
           <button
             onClick={() => setExpanded((v) => !v)}
-            className="flex items-center gap-1 text-xs text-primary-500 hover:text-primary-600 transition-colors"
+            className="flex items-center gap-1 text-xs text-primary-500 hover:text-primary-600 transition-colors min-h-[36px] py-1"
           >
             {expanded ? (
               <>
@@ -249,7 +249,7 @@ export default function WrongNotesPage() {
   return (
     <div className="max-w-2xl mx-auto px-4 py-8 space-y-6">
       {/* 헤더 */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">오답 노트</h1>
           <p className="text-sm text-text-muted mt-0.5">
@@ -258,7 +258,7 @@ export default function WrongNotesPage() {
         </div>
 
         {/* 상단 액션 */}
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {unresolvedIds.length > 0 && (
             <Link
               href={`/quiz/play?wrongQuestionIds=${unresolvedIds.join(',')}`}
@@ -286,31 +286,25 @@ export default function WrongNotesPage() {
       </div>
 
       {/* 필터 바 */}
-      <div className="flex flex-wrap gap-3">
-        <div className="w-36">
-          <Select
-            options={CHAPTER_OPTIONS}
-            value={chapterFilter}
-            onChange={(e) => setChapterFilter(e.target.value)}
-            aria-label="챕터 필터"
-          />
-        </div>
-        <div className="w-36">
-          <Select
-            options={PERIOD_OPTIONS}
-            value={periodFilter}
-            onChange={(e) => setPeriodFilter(e.target.value as PeriodFilter)}
-            aria-label="기간 필터"
-          />
-        </div>
-        <div className="w-36">
-          <Select
-            options={STATUS_OPTIONS}
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-            aria-label="상태 필터"
-          />
-        </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <Select
+          options={CHAPTER_OPTIONS}
+          value={chapterFilter}
+          onChange={(e) => setChapterFilter(e.target.value)}
+          aria-label="챕터 필터"
+        />
+        <Select
+          options={PERIOD_OPTIONS}
+          value={periodFilter}
+          onChange={(e) => setPeriodFilter(e.target.value as PeriodFilter)}
+          aria-label="기간 필터"
+        />
+        <Select
+          options={STATUS_OPTIONS}
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          aria-label="상태 필터"
+        />
       </div>
 
       {/* 오답 목록 */}

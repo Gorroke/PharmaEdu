@@ -32,6 +32,9 @@ const TYPE_LABEL: Record<DynamicQuestion['type'], string> = {
   'calc-copay': '본인부담금 계산',
   'calc-total': '요양급여비용 총액',
   'calc-drug-amount': '약품금액 계산',
+  'multi-step': '단계별 계산',
+  'error-spot': '오류 찾기',
+  'fill-blank': '빈칸 채우기',
 };
 
 // ─── 서브 컴포넌트: 약품 테이블 ──────────────────────────────────────────────
@@ -219,7 +222,7 @@ export default function DynamicQuizPage() {
                 key={d}
                 onClick={() => handleDifficultyChange(d)}
                 className={[
-                  'flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-all duration-150',
+                  'flex-1 py-2.5 min-h-[44px] px-3 rounded-lg border text-sm font-medium transition-all duration-150',
                   difficulty === d
                     ? d === 1
                       ? 'bg-success-100 border-success-500 text-success-500'

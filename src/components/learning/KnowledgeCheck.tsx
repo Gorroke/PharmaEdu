@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { getKCQuestions } from './knowledge-check-data';
 import type { KCQuestion } from './knowledge-check-data';
+import { markKCPassed } from '@/lib/learning/progress';
 
 // ─────────────────────────────────────────────
 // Types
@@ -13,6 +14,12 @@ import type { KCQuestion } from './knowledge-check-data';
 
 interface KnowledgeCheckProps {
   checkId: string;
+  /**
+   * 소속 lesson slug. 제공되면 이 KC 통과 시 해당 lesson 의 quizPassed 를 기록하고
+   * 후속 lesson unlock 체크를 트리거한다.
+   */
+  lessonSlug?: string;
+  /** legacy 콜백 — wiring 호환용. 내부 progress 처리와 별개로 호출됨. */
   onPass?: () => void;
 }
 
@@ -135,7 +142,7 @@ function QuestionCard({ question, qIndex, state, submitted, onSelect }: Question
 // Main Component
 // ─────────────────────────────────────────────
 
-export function KnowledgeCheck({ checkId, onPass }: KnowledgeCheckProps) {
+export function KnowledgeCheck({ checkId, lessonSlug, onPass }: KnowledgeCheckProps) {
   const questions = getKCQuestions(checkId);
 
   const initialStates = (): QuestionState[] =>
@@ -175,6 +182,15 @@ export function KnowledgeCheck({ checkId, onPass }: KnowledgeCheckProps) {
     const passed = updated.every((s) => s.answerState === 'correct');
     if (passed) {
       setAllPassed(true);
+      // 학습 진도 기록 — 이 KC 의 checkId 를 lesson 의 passedKCs 에 추가 (중복 제거).
+      // lesson 전체 completed 처리는 StepView 의 마지막 step 도달 시 별도 분기에서 수행.
+      if (lessonSlug && checkId) {
+        try {
+          markKCPassed(lessonSlug, checkId);
+        } catch {
+          // localStorage 접근 실패 시 silently 무시 (학습 흐름 막지 않음)
+        }
+      }
       onPass?.();
     }
   };

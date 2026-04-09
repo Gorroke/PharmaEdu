@@ -32,6 +32,7 @@ const TEST_FILES = [
   'modules-drug648.test.ts',
   'modules-safety-net.test.ts',
   'modules-exemption.test.ts',
+  'modules-copayment-b2b5.test.ts',
 ];
 
 // ─── 실행 ─────────────────────────────────────────────────────────────────────

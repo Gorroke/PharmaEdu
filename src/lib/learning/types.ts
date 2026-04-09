@@ -9,6 +9,8 @@ export interface LessonProgress {
   status: LessonStatus;
   readPercent: number;       // 0~100
   quizPassed: boolean;
+  /** 통과한 인라인 KnowledgeCheck checkId 목록 (마크다운 마커 단위) */
+  passedKCs?: string[];
   visitedAt?: number;        // Unix timestamp (ms)
   completedAt?: number;      // Unix timestamp (ms)
 }

@@ -28,6 +28,7 @@
 
 import type { CalcOptions, CalcResult, InsuRate } from '../../types';
 import { trunc10, trunc100 } from '../../rounding';
+import { determineGsCode } from './gs-code';
 
 // ─── 보훈코드 상수 ────────────────────────────────────────────────────────────
 
@@ -195,25 +196,56 @@ export function isBohunHospital(hospCode: string): boolean {
  * 내부 — MpvaPrice(보훈청구액) 산출
  *
  * C# CopaymentCalculator.CalcMpvaPrice() 포팅
+ * 근거: CopaymentCalculator.cs:L855-L893
  *
  * 분기:
- *  - G10 이외 보험(C/D)에서 M10이 아닌 경우 → 0 반환 (단, G타입은 항상 산출)
- *  - 위탁(isMPVBill): trunc10(총액 × 감면율/100) — 정산 방식
- *  - 비위탁: 총액 - trunc10(총액 × (100-감면율)/100) — 역산 방식
+ *  1. bohunRate <= 0 → 0 반환
+ *  2. bohunRate >= 100 → totalPrice 전액 반환
+ *  3. 보험유형 필터 (C# L860-L879):
+ *     - D타입(의료급여) 또는 C21/C31/C32 보험코드이면서 M10이 아닌 경우 → 0 반환
+ *     - 단 예외: dosDate >= '20190101' && sbrdnType === 'B014' && D타입이면 계속 계산
+ *  4. 위탁(isMPVBill): trunc10(총액 × 감면율/100) — 정산 방식
+ *  5. 비위탁: 총액 - trunc10(총액 × (100-감면율)/100) — 역산 방식
  *    (절사 오차가 환자에게 불리하지 않도록 비보훈분을 먼저 절사)
  *
- * @param totalPrice 요양급여비용총액1
- * @param bohunRate  감면율 (0~100)
- * @param isMPVBill  위탁 여부 (G20 등)
+ * @param totalPrice  요양급여비용총액1
+ * @param bohunRate   감면율 (0~100)
+ * @param isMPVBill   위탁 여부 (G20 등)
+ * @param insuCode    보험코드 (D10/C21/C31/C32 필터용)
+ * @param bohunCode   보훈코드 (M10 예외 판정용)
+ * @param dosDate     조제일자 (yyyyMMdd) — 2019 이후 D+B014 예외용
+ * @param sbrdnType   수급권자유형 ('B014' 예외용)
  * @returns MpvaPrice
  */
 function calcMpvaPrice(
   totalPrice: number,
   bohunRate: number,
   isMPVBill: boolean,
+  insuCode: string,
+  bohunCode: string,
+  dosDate: string,
+  sbrdnType: string,
 ): number {
   if (bohunRate <= 0) return 0;
   if (bohunRate >= 100) return totalPrice;
+
+  // ── 보험유형 필터 (C# CopaymentCalculator.cs:L860-L879) ──────────────────
+  // D타입(의료급여) 또는 C21/C31/C32 + M10 아닌 경우 → MpvaPrice=0
+  const category = insuCode.charAt(0).toUpperCase();
+  const isMedicalAid = category === 'D';
+  const isExcludedC = insuCode === 'C21' || insuCode === 'C31' || insuCode === 'C32';
+
+  if ((isMedicalAid || isExcludedC) && bohunCode !== BohunCode.M10) {
+    // 예외: 2019.01.01 이후 D타입 + B014 수급권자는 계산 허용
+    // 근거: CopaymentCalculator.cs:L868-L874
+    const isB014Exception =
+      isMedicalAid &&
+      dosDate >= '20190101' &&
+      sbrdnType === 'B014';
+    if (!isB014Exception) {
+      return 0;
+    }
+  }
 
   if (isMPVBill) {
     // 위탁: 정산 방식
@@ -277,11 +309,20 @@ export function calcVeteran(
 
   // ── Step 4: MpvaPrice 사전 산출 ──────────────────────────────────────────
   // M20·M61은 이 단계에서 mpvaPrice=0 (CalcCopay_G 내부에서 결정)
+  const sbrdnType = options.sbrdnType ?? '';
   let mpvaPrice =
     bohunRate > 0 &&
     bohunCode !== BohunCode.M20 &&
     bohunCode !== BohunCode.M61
-      ? calcMpvaPrice(totalPrice, bohunRate, isMPVBill)
+      ? calcMpvaPrice(
+          totalPrice,
+          bohunRate,
+          isMPVBill,
+          options.insuCode,
+          bohunCode,
+          dosDate,
+          sbrdnType,
+        )
       : 0;
 
   // ── Step 5: 본인부담금 산출 ───────────────────────────────────────────────
@@ -410,6 +451,32 @@ export function calcVeteran(
     },
   ];
 
+  // ── B-9/B-10: GsCode + MT038 결정 ──────────────────────────────────────────
+  const mt038Input = options.mt038 ?? '';
+  const mt038Output = determineMt038Output(options.insuCode, mt038Input, dosDate);
+  const gsCode = determineGsCode(options.insuCode, bohunCode, mt038Input, dosDate);
+
+  // ── C-9: MpvaComm 산출 ───────────────────────────────────────────────────
+  // CalcResult에서 비급여 약품 합계를 가져온다 (index.ts buildResult에서 채워짐).
+  // SumWageComm(비급여수가가산)은 현재 TS 미산출이므로 0으로 처리.
+  // 근거: CopaymentCalculator.cs:L1182-L1217
+  const sumUserDrugVal = result.sumUserDrug ?? 0;
+  const sumWageCommVal = result.sumWageComm ?? 0;
+  const mpvaCommVal = calcMpvaComm(
+    options.insuCode,
+    bohunCode,
+    bohunRate,
+    sumUserDrugVal,
+    sumWageCommVal,
+  );
+
+  steps.push({
+    title: 'MpvaComm (보훈 비급여 감면분)',
+    formula: `Trunc10((${sumUserDrugVal}+${sumWageCommVal}) × ${bohunRate}%) = ${mpvaCommVal}원`,
+    result: mpvaCommVal,
+    unit: '원',
+  });
+
   // ── CalcResult 업데이트 ────────────────────────────────────────────────────
   return {
     ...result,
@@ -417,9 +484,196 @@ export function calcVeteran(
     pubPrice: insuPrice + mpvaPrice, // pubPrice = insuPrice + mpvaPrice (기존 정의 유지)
     mpvaPrice,
     insuPrice,
+    mpvaComm: mpvaCommVal,
+    gsCode,
+    mt038: mt038Output,
     steps: [
       ...result.steps,
       ...steps.map(s => ({ title: s.title, formula: s.formula, result: s.result, unit: s.unit })),
     ],
   };
+}
+
+// ─── C-7: 두 청구 체계 분리 ──────────────────────────────────────────────────
+
+/**
+ * 보훈 청구 체계 분류 결과
+ *
+ * 보훈병원 업무처리 기준(P08)과 보훈위탁진료 작성요령(2025)을 명확히 구분.
+ * 두 체계를 혼용하면 공상등구분 코드 오기재로 심사 반송이 발생한다.
+ *
+ * 근거: CH12 §5.3~5.4; 99_FINAL_REPORT §4.11 C-48
+ */
+export type BohunBillingSystem =
+  | 'G10_HOSPITAL' // 보훈병원 업무처리 기준 (P08) — G10, 공상등구분 3/5/6/4/7/J, MT038 미사용
+  | 'G20_DELEGATE' // 보훈위탁진료 기준 (작성요령) — G20, 공상등구분 0/4/6/7, MT038 사용 가능
+  | 'NONE';        // 비보훈
+
+/**
+ * 두 청구 체계 분리 — insuCode 기반 (C-7)
+ *
+ * 보험코드(insuCode)로 어느 청구 체계에 속하는지 결정한다.
+ * calcVeteran 내부에서도 활용하며, 명세서 생성 레이어에서 GsCode 허용범위 검증에 사용한다.
+ *
+ * G10 → G10_HOSPITAL: P08 보훈병원 업무처리 기준 약국
+ *   - 공상등구분 허용: 3(M10), 5(M20), 6(M30), 4(M50), 7(M60/M61/M81), J(M83/M90)
+ *   - MT038: 미사용
+ *
+ * G20 → G20_DELEGATE: 보훈위탁진료 작성요령 약국
+ *   - 공상등구분 허용: 0(감면환자), 4(국비조제), 6(도서벽지 60%+MT038='A'), 7(타질환+MT038='2')
+ *   - MT038: 'A'/'2' 사용 가능 (2013~), '1'은 2018.01.01부터 폐지
+ *
+ * 근거:
+ *   - CH12 §5.3 (G10 보훈병원 업무처리 기준)
+ *   - CH12 §5.4 (G20 보훈위탁진료)
+ *   - C# GsCode.cs:L55-L76
+ *
+ * @param insuCode 보험코드
+ * @returns 청구 체계 분류
+ */
+export function classifyBohunSystem(insuCode: string): BohunBillingSystem {
+  if (insuCode === 'G10') return 'G10_HOSPITAL';
+  if (insuCode === 'G20') return 'G20_DELEGATE';
+  return 'NONE';
+}
+
+/**
+ * 보훈 체계별 허용 공상등구분 코드 집합 반환
+ *
+ * 명세서 EDI 필드 검증 및 청구서 출력 레이어에서
+ * GsCode 혼용(G10 코드를 G20에 기재하는 등) 방지에 사용한다.
+ *
+ * G10 허용 코드: '3', '5', '6', '4', '7', 'J'
+ * G20 허용 코드: '0', '4', '6', '7'
+ * NONE         : 공란 (빈 집합)
+ *
+ * 근거: CH12 §5.3~5.4; C# GsCode.cs 상수 정의
+ */
+export function getAllowedGsCodes(system: BohunBillingSystem): Set<string> {
+  switch (system) {
+    case 'G10_HOSPITAL':
+      // P08 보훈병원 업무처리 기준: 3/5/6/4/7/J
+      // 근거: C# GsCode.cs National100='3', DoubleReduction='5', Reduction30='6',
+      //       Reduction50='4', Reduction60='7', Reduction90='J'
+      return new Set(['3', '5', '6', '4', '7', 'J']);
+    case 'G20_DELEGATE':
+      // 보훈위탁진료 작성요령: 0/4/6/7
+      // 근거: C# GsCode.cs DelegateReduction='0', DelegateNational='4',
+      //       DelegateIsland60='6', DelegateOtherDisease='7'
+      return new Set(['0', '4', '6', '7']);
+    default:
+      return new Set<string>();
+  }
+}
+
+// ─── C-9: MpvaComm 산출 ──────────────────────────────────────────────────────
+
+/**
+ * MpvaComm(보훈 비급여 감면분) 산출 (C-9)
+ *
+ * C# CopaymentCalculator.CalcMpvaComm() 포팅
+ * 근거: CopaymentCalculator.cs:L1182-L1217
+ *
+ * 보훈 환자의 비급여 약품·수가에 대해 보훈청이 대신 부담하는 감면금액.
+ * SumUser 최종 확정 시 이 금액을 차감: SumUser -= MpvaComm
+ * (CopaymentCalculator.cs:L284)
+ *
+ * 산출 공식:
+ *   비급여금액 = SumUserDrug(비급여약품합계) + SumWageComm(비급여수가가산합계)
+ *   MpvaComm  = Trunc10(비급여금액 × bohunRate / 100)
+ *
+ * 적용 제외:
+ *   - bohunRate <= 0 또는 bohunCode 없음 → 0
+ *   - D타입(의료급여) 또는 C21/C31/C32 + M10이 아닌 경우 → 0
+ *     (근거: CopaymentCalculator.cs:L1196-L1205)
+ *   - 비급여금액 <= 0 → 0
+ *
+ * 주의:
+ *   SumWageComm(비급여수가가산)은 현재 TS 파이프라인에서 미산출.
+ *   비급여조제료 별도 구현 시 CalcResult.sumWageComm에 채워 넣어야 함.
+ *   현재는 sumWageComm=0으로 처리 → 비급여약품만 있는 경우에만 정확.
+ *
+ * @param insuCode    보험코드 (D/C21/C31/C32 필터용)
+ * @param bohunCode   보훈코드 (M10~M90)
+ * @param bohunRate   감면율 (0~100%)
+ * @param sumUserDrug 비급여 약품 합계 (원) — C# SumUserDrug
+ * @param sumWageComm 비급여 수가 가산 합계 (원) — C# SumWageComm (미산출 시 0)
+ * @returns MpvaComm (원, 10원 절사)
+ */
+export function calcMpvaComm(
+  insuCode: string,
+  bohunCode: string,
+  bohunRate: number,
+  sumUserDrug: number,
+  sumWageComm: number,
+): number {
+  if (bohunRate <= 0 || !bohunCode) return 0;
+
+  // D타입(의료급여) 또는 C21/C31/C32 + M10 아닌 경우 → MpvaComm=0
+  // 근거: CopaymentCalculator.cs:L1196-L1205
+  const category = insuCode.charAt(0).toUpperCase();
+  const isMedicalAid = category === 'D';
+  const isExcludedC = insuCode === 'C21' || insuCode === 'C31' || insuCode === 'C32';
+  if ((isMedicalAid || isExcludedC) && bohunCode !== BohunCode.M10) {
+    return 0;
+  }
+
+  // 비급여금액 = 비급여약품합계 + 비급여수가가산합계
+  // 근거: CopaymentCalculator.cs:L1207-L1208
+  const nPayAmount = sumUserDrug + sumWageComm;
+  if (nPayAmount <= 0) return 0;
+
+  // MpvaComm = Trunc10(비급여금액 × bohunRate / 100)
+  // 근거: CopaymentCalculator.cs:L1213-L1214
+  return trunc10(nPayAmount * bohunRate / 100);
+}
+
+// ─── B-10: MT038 출력값 결정 ─────────────────────────────────────────────────
+
+/**
+ * MT038 특정내역 출력값 결정 (명세서 기재용)
+ *
+ * C# CopaymentCalculator.DetermineMt038Output() 포팅
+ *
+ * G20 위탁진료 약국에만 적용. G10 또는 MT038 없으면 "" 반환.
+ *
+ * 규칙:
+ *   "A" → "A"          (도서벽지 60% 감면, 날짜 제한 없음)
+ *   "2" → "2"          (국비환자 타질환 조제분, 2013~ )
+ *   "1" + 2018 이전 → "1"  (2018.01.01부터 폐지, 역호환)
+ *   "1" + 2018 이후 → ""   (폐지)
+ *   그 외 → ""
+ *
+ * 근거: CH12 §5.6; 2025 작성요령 p.593, p.604, p.616
+ *
+ * @param insuCode   보험코드 (G20이어야 적용)
+ * @param mt038Input CalcOptions.mt038 입력값 ("1"/"2"/"A"/"")
+ * @param dosDate    조제일자 (yyyyMMdd)
+ * @returns 명세서 기재 MT038 값 ("2"/"A"/"") — "1"은 2018.01.01부터 폐지
+ */
+export function determineMt038Output(
+  insuCode: string,
+  mt038Input: string,
+  dosDate: string,
+): string {
+  // G20 위탁진료 약국에만 적용
+  if (insuCode !== 'G20' || !mt038Input) return '';
+
+  switch (mt038Input) {
+    // MT038='A': 60% 감면 도서벽지 내 — 날짜 제한 없음
+    // 근거: 작성요령 p.593, p.616, p.697; CH12 §5.4
+    case 'A': return 'A';
+
+    // MT038='2': 국비환자 타질환 조제분 (2013.01.01 이후)
+    // 근거: 작성요령 p.604; CH12 §5.6
+    case '2': return '2';
+
+    // MT038='1': 2018.01.01 이전 일부본인부담대상 전상군경등 국비질환분
+    // 2018.01.01부터 폐지. 이전 데이터 역호환용으로만 출력.
+    // 근거: CH12 §5.6 "MT038='1'은 2018.01.01 진료분부터 삭제"
+    case '1': return dosDate < '20180101' ? '1' : '';
+
+    // 그 외: 미기재
+    default: return '';
+  }
 }

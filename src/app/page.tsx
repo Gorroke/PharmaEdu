@@ -1,91 +1,9 @@
 import Link from "next/link";
 import { Calculator, BookOpen, ClipboardList, Calendar, Pill } from "lucide-react";
-import { createServerSupabase } from "@/lib/supabase-server";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { DailyStatusBanner } from "@/components/home/DailyStatusBanner";
-
-export const dynamic = "force-dynamic";
-
-type TableResult = {
-  name: string;
-  label: string;
-  count: number | null;
-  expected: number;
-  error: string | null;
-};
-
-async function checkConnection() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !key) {
-    return {
-      envOk: false,
-      envError: `환경 변수 누락: URL=${!!url}, KEY=${!!key}`,
-      tables: [] as TableResult[],
-      sample: null,
-      sampleError: null as string | null,
-    };
-  }
-
-  try {
-    const supabase = await createServerSupabase();
-
-    const tableSpecs: { name: string; label: string; expected: number }[] = [
-      { name: "suga_fee", label: "수가 단가", expected: 568 },
-      { name: "fee_base_params", label: "기본 파라미터", expected: 3 },
-      { name: "insu_rate", label: "보험요율", expected: 18 },
-      { name: "holiday", label: "공휴일", expected: 53 },
-      { name: "presc_dosage_fee", label: "투약일수 조제료", expected: 50 },
-    ];
-
-    const tables: TableResult[] = await Promise.all(
-      tableSpecs.map(async (spec) => {
-        try {
-          const { count, error } = await supabase
-            .from(spec.name)
-            .select("*", { count: "exact", head: true });
-          return {
-            ...spec,
-            count: count ?? null,
-            error: error?.message ?? null,
-          };
-        } catch (e) {
-          return {
-            ...spec,
-            count: null,
-            error: e instanceof Error ? e.message : String(e),
-          };
-        }
-      })
-    );
-
-    const { data: sample, error: sampleError } = await supabase
-      .from("suga_fee")
-      .select("code, name, price")
-      .eq("apply_year", 2026)
-      .eq("code", "Z1000")
-      .maybeSingle();
-
-    return {
-      envOk: true,
-      envError: null,
-      tables,
-      sample,
-      sampleError: sampleError?.message ?? null,
-    };
-  } catch (e) {
-    return {
-      envOk: true,
-      envError: e instanceof Error ? e.message : String(e),
-      tables: [] as TableResult[],
-      sample: null,
-      sampleError: null,
-    };
-  }
-}
 
 // ─── 4대 기능 카드 정의 ─────────────────────────────────────────────────────
 
@@ -143,13 +61,7 @@ const features: FeatureCard[] = [
   },
 ];
 
-export default async function Home() {
-  const result = await checkConnection();
-  const allOk =
-    result.envOk &&
-    result.tables.length > 0 &&
-    result.tables.every((t) => t.count === t.expected && !t.error);
-
+export default function Home() {
   return (
     <div className="min-h-screen">
       {/* ── 히어로 섹션 ── */}
@@ -267,112 +179,6 @@ export default async function Home() {
             );
           })}
         </div>
-      </section>
-
-      {/* ── Supabase 연결 상태 (Phase 1 검증용, 유지) ── */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-12 sm:pb-16">
-        <Card variant="standard" className="max-w-3xl mx-auto">
-          <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-            <span
-              className={allOk ? "text-success-500" : "text-error-500"}
-              aria-hidden="true"
-            >
-              {allOk ? "✓" : "✗"}
-            </span>
-            Supabase 연결 상태
-            <Badge variant={allOk ? "success" : "error"}>
-              {allOk ? "정상" : "오류"}
-            </Badge>
-          </h2>
-
-          {!result.envOk && (
-            <div className="bg-error-100 border border-error-500/30 rounded-lg p-4 text-sm text-error-500 mb-4">
-              <strong>환경 변수 오류:</strong> {result.envError}
-            </div>
-          )}
-
-          {result.envOk && result.envError && (
-            <div className="bg-error-100 border border-error-500/30 rounded-lg p-4 text-sm text-error-500 mb-4">
-              <strong>연결 오류:</strong> {result.envError}
-            </div>
-          )}
-
-          {result.tables.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border-light text-left text-text-muted">
-                    <th className="py-2 font-medium">테이블</th>
-                    <th className="py-2 font-medium">설명</th>
-                    <th className="py-2 text-right font-medium">실제</th>
-                    <th className="py-2 text-right font-medium">예상</th>
-                    <th className="py-2 text-right font-medium">상태</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.tables.map((t) => (
-                    <tr key={t.name} className="border-b border-border-light">
-                      <td className="py-2 font-mono text-xs">{t.name}</td>
-                      <td className="py-2 text-text-secondary">{t.label}</td>
-                      <td className="py-2 text-right font-mono">{t.count ?? "—"}</td>
-                      <td className="py-2 text-right font-mono text-text-muted">
-                        {t.expected}
-                      </td>
-                      <td className="py-2 text-right">
-                        {t.error ? (
-                          <Badge variant="error">ERR</Badge>
-                        ) : t.count === t.expected ? (
-                          <Badge variant="success">OK</Badge>
-                        ) : (
-                          <Badge variant="error">FAIL</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {result.tables.some((t) => t.error) && (
-            <div className="mt-4 bg-error-100 border border-error-500/30 rounded-lg p-4 text-xs text-error-500">
-              <strong>테이블별 오류:</strong>
-              <ul className="mt-2 space-y-1">
-                {result.tables
-                  .filter((t) => t.error)
-                  .map((t) => (
-                    <li key={t.name}>
-                      <span className="font-mono">{t.name}</span>: {t.error}
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          )}
-
-          {result.sample && (
-            <div className="mt-6 pt-4 border-t border-border-light">
-              <h3 className="text-base font-semibold mb-3">샘플 조회</h3>
-              <p className="text-sm text-text-muted mb-2">2026년 Z1000 (약국관리료)</p>
-              <div className="bg-bg-panel rounded-lg p-4 font-mono text-sm space-y-1">
-                <div>
-                  code: <strong>{result.sample.code}</strong>
-                </div>
-                <div>
-                  name: <strong>{result.sample.name}</strong>
-                </div>
-                <div>
-                  price: <strong>{result.sample.price}원</strong>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {result.sampleError && (
-            <div className="mt-4 bg-error-100 border border-error-500/30 rounded-lg p-4 text-sm text-error-500">
-              <strong>샘플 조회 오류:</strong> {result.sampleError}
-            </div>
-          )}
-        </Card>
       </section>
     </div>
   );

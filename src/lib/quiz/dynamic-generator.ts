@@ -2,11 +2,10 @@
  * dynamic-generator.ts
  * 계산형 동적 문제 생성기 — calc-engine을 활용한 무한 문제 생성
  *
- * MVP: insuCode=C10 (건강보험 일반) 고정
  * 난이도별 파라미터 범위:
- *   1=쉬움  : 성인(20~60세), 약품 1개, 투여일수 1~7일
- *   2=보통  : 65세 이상 포함, 약품 2~3개, 투여일수 1~14일
- *   3=어려움: 6세 미만 포함, 약품 3~5개, 투여일수 1~14일
+ *   1=쉬움  : 성인(20~60세), 약품 1개, 투여일수 1~7일, 보험: 건강보험
+ *   2=보통  : 65세 이상 포함, 약품 2~3개, 투여일수 1~14일, 보험: 건강보험/의료급여
+ *   3=어려움: 6세 미만 포함, 약품 3~5개, 투여일수 1~14일, 보험: 건강보험/의료급여/보훈
  */
 
 import type { CalcOptions, CalcResult, ICalcRepository } from '@/lib/calc-engine';
@@ -14,17 +13,60 @@ import { calculate } from '@/lib/calc-engine';
 
 // ─── 타입 정의 ────────────────────────────────────────────────────────────────
 
+/** drug_master 테이블 행 (퀴즈 재설계 스키마) */
+export interface DrugMasterRow {
+  edi_code: string;
+  name: string;
+  unit_price: number;
+  insu_pay_type: 'C' | 'N' | 'S';
+  is_powder: boolean;
+  atc_class: string | null;
+  /** 임상 그룹 (cold_adult, hypertension_mono 등) — 함께 처방되는 약품 묶음 */
+  clinical_group: string | null;
+  /** 적합 연령 하한 (NULL=무관) */
+  age_min: number | null;
+  /** 적합 연령 상한 (NULL=무관) */
+  age_max: number | null;
+  /** 표준 1회 투약량 */
+  typical_dose: number;
+  /** 표준 1일 투여횟수 */
+  typical_dnum: number;
+  /** 표준 처방일수 하한 */
+  typical_dday_min: number;
+  /** 표준 처방일수 상한 */
+  typical_dday_max: number;
+  apply_year: number;
+}
+
 export interface DynamicDrug {
   code: string;
+  name: string;
   price: number;
   dose: number;
   dnum: number;
   dday: number;
 }
 
+export type DynamicQuestionType =
+  | 'calc-copay'
+  | 'calc-total'
+  | 'calc-drug-amount'
+  | 'multi-step'
+  | 'error-spot'
+  | 'fill-blank';
+
+export type DynamicAnswerField =
+  | 'totalPrice'
+  | 'userPrice'
+  | 'insuPrice'
+  | 'drugAmount'
+  | 'multiStep'
+  | 'errorSpot'
+  | 'fillBlank';
+
 export interface DynamicQuestion {
   id: string;
-  type: 'calc-copay' | 'calc-total' | 'calc-drug-amount';
+  type: DynamicQuestionType;
   difficulty: 1 | 2 | 3;
   prompt: string;
   given: {
@@ -32,9 +74,16 @@ export interface DynamicQuestion {
     age: number;
     drugs: DynamicDrug[];
   };
+  /** 단일 정답 (calc-* 유형). 복합 정답은 correctAnswerComplex 사용 */
   correctAnswer: number;
-  answerField: 'totalPrice' | 'userPrice' | 'insuPrice' | 'drugAmount';
+  /** 복합 정답 (multi-step / fill-blank: {step1, step2, ...} / error-spot: 인덱스 배열 등) */
+  correctAnswerComplex?: Record<string, number | string>;
+  answerField: DynamicAnswerField;
   explanation: string;
+  /** 시나리오 라벨 (성인 감기, 고혈압 단독 등) — UI 노출 */
+  scenarioLabel?: string;
+  /** 렌더러용 추가 데이터 (multi-step steps / fill-blank slots / error-spot steps 등) */
+  payload?: unknown;
 }
 
 // ─── 내부 유틸리티 ───────────────────────────────────────────────────────────
@@ -58,36 +107,135 @@ function todayStr(): string {
   return `${y}${m}${day}`;
 }
 
-// 예시 약품 코드 목록 (실제 EDI 코드 패턴, 교육용 더미)
+// 예시 약품 코드 목록 (drug_master 미사용 시 fallback)
 const SAMPLE_CODES = [
-  '012345678', // 예시 약품 A
-  '023456789', // 예시 약품 B
-  '034567890', // 예시 약품 C
-  '045678901', // 예시 약품 D
-  '056789012', // 예시 약품 E
+  '012345678',
+  '023456789',
+  '034567890',
+  '045678901',
+  '056789012',
 ];
+
+const SAMPLE_NAMES = ['약품A', '약품B', '약품C', '약품D', '약품E'];
+
+// ─── 보험코드 풀 ──────────────────────────────────────────────────────────────
+
+const INSU_POOL: Record<1 | 2 | 3, string[]> = {
+  1: ['C10'],
+  2: ['C10', 'D10'],
+  3: ['C10', 'D10', 'G10'],
+};
+
+function insuLabel(code: string): string {
+  if (code.startsWith('C')) return '건강보험';
+  if (code.startsWith('D')) return '의료급여';
+  if (code.startsWith('G')) return '보훈';
+  if (code.startsWith('S')) return '산재';
+  if (code.startsWith('A')) return '자동차보험';
+  return '기타보험';
+}
+
+// ─── drug_master 페처 (lazy-cached) ───────────────────────────────────────────
+
+// 모듈 레벨 캐시
+let _drugMasterCache: DrugMasterRow[] | null = null;
+
+/**
+ * Supabase 클라이언트 최소 시그니처.
+ * @supabase/supabase-js의 PostgrestFilterBuilder는 PromiseLike(thenable)지만
+ * 실제 Promise는 아니므로, 호출부 호환을 위해 from()을 any로 둔다.
+ * 런타임에서는 정상 동작하며, fetchDrugMaster 내부에서 결과를 unknown으로 좁힌다.
+ */
+type MinimalSupabase = { from: (table: string) => any };
+
+/**
+ * drug_master 테이블에서 약품 마스터를 조회 (apply_year <= 현재 연도)
+ * 모듈 레벨 캐시 사용 — 첫 호출 시에만 실제 쿼리
+ */
+export async function fetchDrugMaster(
+  supabase: MinimalSupabase
+): Promise<DrugMasterRow[]> {
+  if (_drugMasterCache && _drugMasterCache.length > 0) {
+    return _drugMasterCache;
+  }
+
+  try {
+    const currentYear = new Date().getFullYear();
+    const { data, error } = await supabase
+      .from('drug_master')
+      .select(
+        'edi_code, name, unit_price, insu_pay_type, is_powder, atc_class, ' +
+        'clinical_group, age_min, age_max, ' +
+        'typical_dose, typical_dnum, typical_dday_min, typical_dday_max, apply_year'
+      )
+      .lte('apply_year', currentYear);
+
+    if (error || !data) {
+      console.error('[dynamic-generator] fetchDrugMaster error:', error);
+      _drugMasterCache = [];
+      return [];
+    }
+
+    const rows = (data as unknown[]).map((r) => {
+      const row = r as Record<string, unknown>;
+      return {
+        edi_code: String(row.edi_code),
+        name: String(row.name),
+        unit_price: Number(row.unit_price),
+        insu_pay_type: (row.insu_pay_type as 'C' | 'N' | 'S') ?? 'C',
+        is_powder: Boolean(row.is_powder),
+        atc_class: row.atc_class != null ? String(row.atc_class) : null,
+        clinical_group: row.clinical_group != null ? String(row.clinical_group) : null,
+        age_min: row.age_min != null ? Number(row.age_min) : null,
+        age_max: row.age_max != null ? Number(row.age_max) : null,
+        typical_dose: row.typical_dose != null ? Number(row.typical_dose) : 1,
+        typical_dnum: row.typical_dnum != null ? Number(row.typical_dnum) : 1,
+        typical_dday_min: row.typical_dday_min != null ? Number(row.typical_dday_min) : 1,
+        typical_dday_max: row.typical_dday_max != null ? Number(row.typical_dday_max) : 7,
+        apply_year: Number(row.apply_year),
+      } satisfies DrugMasterRow;
+    });
+
+    _drugMasterCache = rows;
+    return rows;
+  } catch (err) {
+    console.error('[dynamic-generator] fetchDrugMaster exception:', err);
+    _drugMasterCache = [];
+    return [];
+  }
+}
+
+/** 캐시 리셋 (테스트/개발용) */
+export function _resetDrugMasterCache(): void {
+  _drugMasterCache = null;
+}
 
 // ─── 나이 선택 로직 ──────────────────────────────────────────────────────────
 
 function pickAge(difficulty: 1 | 2 | 3): number {
   if (difficulty === 1) {
-    // 쉬움: 성인 20~60
     return randInt(20, 60);
   } else if (difficulty === 2) {
-    // 보통: 성인 또는 노인(65세 이상) 50:50
     return Math.random() < 0.5 ? randInt(20, 60) : randInt(65, 80);
   } else {
-    // 어려움: 성인 / 노인(65+) / 소아(6세 미만) 각 1/3
     const r = Math.random();
     if (r < 0.33) return randInt(20, 60);
     if (r < 0.66) return randInt(65, 80);
-    return randInt(0, 5); // 6세 미만
+    return randInt(0, 5);
   }
 }
 
 // ─── 약품 목록 생성 ──────────────────────────────────────────────────────────
 
-function buildDrugList(difficulty: 1 | 2 | 3): DynamicDrug[] {
+/**
+ * 약품 목록 생성
+ * @param difficulty 난이도
+ * @param availableDrugs drug_master 풀 (빈 배열이면 SAMPLE_CODES fallback)
+ */
+function buildDrugList(
+  difficulty: 1 | 2 | 3,
+  availableDrugs: DrugMasterRow[]
+): DynamicDrug[] {
   const countMap: Record<1 | 2 | 3, [number, number]> = {
     1: [1, 1],
     2: [2, 3],
@@ -103,7 +251,7 @@ function buildDrugList(difficulty: 1 | 2 | 3): DynamicDrug[] {
   };
   const [minDay, maxDay] = dayRange[difficulty];
 
-  // 가격 범위: 쉬움=100~1000, 보통=200~3000, 어려움=500~5000
+  // 가격 범위 (drug_master fallback 시 사용)
   const priceRanges: Record<1 | 2 | 3, [number, number]> = {
     1: [100, 1000],
     2: [200, 3000],
@@ -111,13 +259,55 @@ function buildDrugList(difficulty: 1 | 2 | 3): DynamicDrug[] {
   };
   const [minPrice, maxPrice] = priceRanges[difficulty];
 
-  return Array.from({ length: count }, (_, i) => ({
-    code: SAMPLE_CODES[i % SAMPLE_CODES.length],
-    price: randInt(minPrice / 100, maxPrice / 100) * 100, // 100원 단위
-    dose: pickRandom([0.5, 1, 1.5, 2]),
-    dnum: pickRandom([1, 2, 3]),
-    dday: randInt(minDay, maxDay),
-  }));
+  // ── 약품 풀 필터링 ────────────────────────────────────────────────────────
+  // 어려움 모드: 가루약(powder) 포함 가능 (확률 30%)
+  // 그 외: 가루약 제외 (정제/캡슐 위주)
+  let pool = availableDrugs;
+  if (pool.length > 0) {
+    if (difficulty === 3 && Math.random() < 0.3) {
+      // 어려움 30% 확률로 powder 허용 — 풀 그대로
+    } else {
+      const nonPowder = pool.filter((d) => !d.is_powder);
+      if (nonPowder.length > 0) pool = nonPowder;
+    }
+  }
+
+  // ── 풀에서 중복 없이 count개 추출 ─────────────────────────────────────────
+  const useDb = pool.length > 0;
+  const picked: DrugMasterRow[] = [];
+  if (useDb) {
+    const shuffled = [...pool].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < Math.min(count, shuffled.length); i++) {
+      picked.push(shuffled[i]);
+    }
+    // 풀이 count보다 작으면 반복 채움
+    while (picked.length < count) {
+      picked.push(pool[picked.length % pool.length]);
+    }
+  }
+
+  return Array.from({ length: count }, (_, i) => {
+    if (useDb) {
+      const row = picked[i];
+      return {
+        code: row.edi_code,
+        name: row.name,
+        price: Math.round(row.unit_price),
+        dose: pickRandom([0.5, 1, 1.5, 2]),
+        dnum: pickRandom([1, 2, 3]),
+        dday: randInt(minDay, maxDay),
+      };
+    }
+    // Fallback: SAMPLE_CODES
+    return {
+      code: SAMPLE_CODES[i % SAMPLE_CODES.length],
+      name: SAMPLE_NAMES[i % SAMPLE_NAMES.length],
+      price: randInt(minPrice / 100, maxPrice / 100) * 100,
+      dose: pickRandom([0.5, 1, 1.5, 2]),
+      dnum: pickRandom([1, 2, 3]),
+      dday: randInt(minDay, maxDay),
+    };
+  });
 }
 
 // ─── 문제 유형 선택 ──────────────────────────────────────────────────────────
@@ -126,10 +316,8 @@ type QuestionType = DynamicQuestion['type'];
 
 function pickQuestionType(difficulty: 1 | 2 | 3): QuestionType {
   if (difficulty === 1) {
-    // 쉬움: 약품금액 또는 본인부담금
     return Math.random() < 0.5 ? 'calc-drug-amount' : 'calc-copay';
   }
-  // 보통/어려움: 세 유형 중 랜덤
   return pickRandom<QuestionType>(['calc-copay', 'calc-total', 'calc-drug-amount']);
 }
 
@@ -137,9 +325,8 @@ function pickQuestionType(difficulty: 1 | 2 | 3): QuestionType {
 
 function calcDrugAmountOnly(drugs: DynamicDrug[]): number {
   return drugs.reduce((sum, d) => {
-    // 단가 × 1회투약량 × 1일투여횟수 × 총투여일수 (원미만 사사오입 후 합산)
     const raw = d.price * d.dose * d.dnum * d.dday;
-    return sum + Math.round(raw); // 원 단위 반올림
+    return sum + Math.round(raw);
   }, 0);
 }
 
@@ -157,7 +344,7 @@ function drugListText(drugs: DynamicDrug[]): string {
   return drugs
     .map(
       (d, i) =>
-        `  약품${i + 1}: 단가 ${d.price.toLocaleString()}원, ` +
+        `  약품${i + 1} [${d.name}]: 단가 ${d.price.toLocaleString()}원, ` +
         `1회 ${d.dose}정, 1일 ${d.dnum}회, ${d.dday}일치`
     )
     .join('\n');
@@ -172,24 +359,21 @@ function buildExplanation(
 ): string {
   const lines: string[] = [];
 
-  // 약품금액 계산 단계
   lines.push('【약품금액 계산】');
   let totalDrug = 0;
   drugs.forEach((d, i) => {
     const amt = Math.round(d.price * d.dose * d.dnum * d.dday);
     totalDrug += amt;
     lines.push(
-      `  약품${i + 1}: ${d.price} × ${d.dose} × ${d.dnum} × ${d.dday} = ${amt.toLocaleString()}원`
+      `  약품${i + 1} [${d.name}]: ${d.price} × ${d.dose} × ${d.dnum} × ${d.dday} = ${amt.toLocaleString()}원`
     );
   });
   lines.push(`  약품금액 합계 = ${totalDrug.toLocaleString()}원`);
 
   if (type !== 'calc-drug-amount') {
-    // 조제료
     lines.push(`\n【조제료】`);
     lines.push(`  조제료 합계 = ${result.sumWage.toLocaleString()}원`);
 
-    // 요양급여비용 총액
     lines.push(`\n【요양급여비용 총액 (10원 미만 절사)】`);
     lines.push(
       `  (${totalDrug.toLocaleString()} + ${result.sumWage.toLocaleString()})` +
@@ -221,16 +405,25 @@ function buildExplanation(
  * @param difficulty 난이도 (1=쉬움, 2=보통, 3=어려움)
  * @param repo       ICalcRepository (서버 사이드에서 주입)
  * @param type       문제 유형 (미지정 시 난이도에 맞게 랜덤)
+ * @param supabase   Supabase 클라이언트 (drug_master 조회용; 미제공 시 SAMPLE_CODES fallback)
  */
 export async function generateQuestion(
   difficulty: 1 | 2 | 3,
   repo: ICalcRepository,
-  type?: string
+  type?: string,
+  supabase?: MinimalSupabase
 ): Promise<DynamicQuestion> {
   const questionType = (type as QuestionType | undefined) ?? pickQuestionType(difficulty);
   const age = pickAge(difficulty);
-  const drugs = buildDrugList(difficulty);
-  const insuCode = 'C10'; // MVP: 건강보험 일반
+
+  // ── drug_master 조회 (제공된 경우) ────────────────────────────────────────
+  let availableDrugs: DrugMasterRow[] = [];
+  if (supabase) {
+    availableDrugs = await fetchDrugMaster(supabase);
+  }
+
+  const drugs = buildDrugList(difficulty, availableDrugs);
+  const insuCode = pickRandom(INSU_POOL[difficulty]);
 
   // ── calc-engine 호출 ──────────────────────────────────────────────────────
   const calcOpt: CalcOptions = {
@@ -264,7 +457,6 @@ export async function generateQuestion(
     answerField = 'totalPrice';
     promptSuffix = '이 처방전의 요양급여비용 총액(총액1)은 얼마입니까?';
   } else {
-    // calc-copay
     correctAnswer = result.userPrice;
     answerField = 'userPrice';
     promptSuffix = '이 처방전에서 환자가 부담하는 본인일부부담금은 얼마입니까?';
@@ -272,8 +464,9 @@ export async function generateQuestion(
 
   // ── 문제 텍스트 구성 ─────────────────────────────────────────────────────
   const diffLabel = difficulty === 1 ? '쉬움' : difficulty === 2 ? '보통' : '어려움';
+  const insuName = insuLabel(insuCode);
   const prompt = [
-    `[${diffLabel}] 건강보험(C10) 환자입니다.`,
+    `[${diffLabel}] ${insuName}(${insuCode}) 환자입니다.`,
     `환자 나이: ${ageDescription(age)}`,
     `처방 약품 목록:`,
     drugListText(drugs),
